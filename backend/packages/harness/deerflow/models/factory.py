@@ -5,6 +5,7 @@ from langchain.chat_models import BaseChatModel
 from deerflow.config import get_app_config
 from deerflow.reflection import resolve_class
 from deerflow.tracing import build_tracing_callbacks
+from deerflow.utils.llm_logger_callback import LLMLoggerCallback
 
 logger = logging.getLogger(__name__)
 
@@ -116,4 +117,9 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         existing_callbacks = model_instance.callbacks or []
         model_instance.callbacks = [*existing_callbacks, *callbacks]
         logger.debug(f"Tracing attached to model '{name}' with providers={len(callbacks)}")
+    
+    # 添加 LLM 调用日志回调
+    existing_callbacks = model_instance.callbacks or []
+    model_instance.callbacks = [*existing_callbacks, LLMLoggerCallback()]
+    
     return model_instance

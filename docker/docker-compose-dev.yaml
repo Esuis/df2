@@ -200,6 +200,7 @@ services:
           create_host_path: true
     working_dir: /app
     environment:
+      - LOG_COLOR=false
       - CI=true
       - DEER_FLOW_HOME=/app/backend/.deer-flow
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
