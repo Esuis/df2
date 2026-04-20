@@ -34,6 +34,22 @@ token_usage:
 # Configure available LLM models for the agent to use
 
 models:
+  # Example: BOCOM ELLM (Enterprise Large Language Model) with dynamic API key refresh
+  # The ELLM gateway requires an "api-key" header that expires every ~25 minutes.
+  # EllmChatModel automatically refreshes the key in the background.
+  # - name: qwen3-235b-ellm
+  #   display_name: Qwen3-235B-A22B (交银ELLM)
+  #   use: deerflow.models.ellm_provider:EllmChatModel
+  #   model: Qwen3-235B-A22B
+  #   base_url: http://eaip-chn-slb-7006.bocomm.com/ELLM.ELLM-ADAPTER.V-1.0/v1
+  #   api_key_url: http://eaip-ellm-1.bocomm.com/ELLM.ELLM-OMSERVICE.V-1.0/createSceneApiKey.do
+  #   scene_code: P2024146
+  #   api_key_refresh_interval: 1800  # 30 minutes in seconds
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 4096
+  #   temperature: 0.7
+
   # Example: Volcengine (Doubao) model
   # - name: doubao-seed-1.8
   #   display_name: Doubao-Seed-1.8
