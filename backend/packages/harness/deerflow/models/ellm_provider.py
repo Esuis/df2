@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from pydantic import Field, SecretStr
 from langchain_core.language_models import LanguageModelInput
 from langchain_openai import ChatOpenAI
 
@@ -67,6 +68,12 @@ class EllmChatModel(ChatOpenAI):
     scene_code: str = ""
     api_key_refresh_interval: int = 1800
 
+    # 必须在父类初始化校验前就存在一个占位 api_key
+    openai_api_key: SecretStr = Field(
+        default_factory=lambda: SecretStr(_ELLM_PLACEHOLDER_API_KEY),
+        alias='api_key',
+    )
+
     def model_post_init(self, __context: Any) -> None:
         """Initialise the API key manager and set up default headers."""
         if not self.api_key_url:
@@ -90,10 +97,6 @@ class EllmChatModel(ChatOpenAI):
 
         # Obtain initial key
         current_key = self._key_manager.get_api_key()
-
-        # Set a placeholder api_key to satisfy ChatOpenAI validation.
-        # The actual authentication is done via the "api-key" custom header.
-        self.api_key = _ELLM_PLACEHOLDER_API_KEY
 
         # Inject the real key as a custom header.
         # The ELLM gateway expects "api-key" header, not "Authorization: Bearer".
@@ -133,10 +136,6 @@ class EllmChatModel(ChatOpenAI):
         **kwargs: Any,
     ) -> dict:
         """Inject the latest API key into the request payload before sending."""
-        # Refresh the key in default_headers before building the payload
         self._inject_latest_api_key()
-
-        # Build the payload via the parent class
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
-
         return payload
