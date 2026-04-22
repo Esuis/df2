@@ -332,6 +332,9 @@ def make_lead_agent(config: RunnableConfig):
         }
     )
 
+    if spacecode:
+        spacecode_prompt = f"\n<spacecode_directive>\n- **IMPORTANT**: The current request carries the following space codes: {spacecode}. You MUST use these space codes as the `spacecode` parameter when calling `vector_search`, e.g. `vector_search(keyword=\"...\", spacecode={spacecode})`.\n- If the space codes above are an empty list, do NOT pass the `spacecode` parameter — simply omit it so that the default space codes from configuration are used.\n</spacecode_directive>"
+
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
         return create_agent(

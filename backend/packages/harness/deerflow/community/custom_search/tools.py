@@ -69,8 +69,8 @@ def _parse_response(payload: dict[str, Any], max_results: int) -> list[dict[str,
     normalized_results: list[dict[str, Any]] = []
     for item in raw_results:
         title = str(item.get("title", "")).strip()
-        snippet = str(item.get("content", "") or item.get("absContent", "")).strip()
-        if not title and not snippet:
+        content = str(item.get("content", "") or item.get("absContent", "")).strip()
+        if not title and not content:
             continue
         score_raw = item.get("score")
         try:
@@ -81,7 +81,7 @@ def _parse_response(payload: dict[str, Any], max_results: int) -> list[dict[str,
             {
                 "title": title,
                 "url": str(item.get("url") or ""),
-                "snippet": snippet,
+                "content": content,
                 "score": score,
                 "source": str(item.get("source", "")),
                 "category": str(item.get("fullCategoryName", "")),

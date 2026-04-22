@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -11,7 +12,8 @@ from deerflow.config.vector_search_config import VectorSearchConfig, get_vector_
 logger = logging.getLogger(__name__)
 
 
-def _build_request_body(keyword: str, config: VectorSearchConfig) -> dict[str, Any]:
+def _build_request_body(keyword: str, config: VectorSearchConfig, space_codes: list[str] | None = None) -> dict[str, Any]:
+    final_space_codes = space_codes if space_codes is not None else config.space_codes
     return {
         "REQ_HEAD": {
             "TRANS_PROCESS": config.trans_process,
@@ -24,7 +26,7 @@ def _build_request_body(keyword: str, config: VectorSearchConfig) -> dict[str, A
                 "repository": config.repository,
                 "param": {
                     "searchType": config.search_type,
-                    "spaceCodes": config.space_codes,
+                    "spaceCodes": final_space_codes,
                     "rerankFlag": config.rerank_flag,
                     "channelId": config.channel_id,
                     "textTopN": config.text_top_n,
@@ -41,7 +43,7 @@ def _build_request_body(keyword: str, config: VectorSearchConfig) -> dict[str, A
     }
 
 
-def _extract_entry_info(entry: dict[str, Any]) -> str:
+def _extract_entry_info(entry: dict[str, Any]) -> dict[str, Any]:
     title = str(entry.get("title") or "无标题")
     content = str(entry.get("content") or entry.get("absContent") or "")
     score_raw = entry.get("score")
@@ -54,27 +56,20 @@ def _extract_entry_info(entry: dict[str, Any]) -> str:
     except (TypeError, ValueError):
         score = None
 
-    info_lines = [f"名称: {title}"]
-    if score is not None:
-        info_lines.append(f"匹配度: {score:.4f}")
-    if repository:
-        info_lines.append(f"知识库: {repository}")
-    if doc_id:
-        info_lines.append(f"文档ID: {doc_id}")
-    if url:
-        info_lines.append(f"链接: {url}")
-
-    if content:
-        shortened_content = content if len(content) <= 300 else f"{content[:300]}..."
-        info_lines.append(f"详情:\n{shortened_content}")
-
-    return "\n".join(info_lines)
+    return {
+        "title": title,
+        "url": url,
+        "doc_id": doc_id,
+        "score": score,
+        "repository": repository,
+        "content": content,
+    }
 
 
-def _extract_results(payload: dict[str, Any], keyword: str) -> str:
+def _extract_results(payload: dict[str, Any], keyword: str) -> list[dict[str, Any]]:
     response_head = payload.get("RSP_HEAD", {})
     if response_head and response_head.get("TRAN_SUCCESS") != "1":
-        return f"API返回错误: {response_head.get('PROCESS_STATUS_CODE', '未知错误')}"
+        return [{"error": f"API返回错误: {response_head.get('PROCESS_STATUS_CODE', '未知错误')}"}]
 
     all_entries = payload.get("RSP_BODY", {}).get("result", [])
     if not isinstance(all_entries, list):
@@ -82,20 +77,12 @@ def _extract_results(payload: dict[str, Any], keyword: str) -> str:
         all_entries = []
 
     if not all_entries:
-        return f"未找到相关内容。关键词: {keyword}"
+        return [{"info": f"未找到相关内容。关键词: {keyword}"}]
 
-    entry_infos = [f"【结果 {index}】\n{_extract_entry_info(entry)}" for index, entry in enumerate(all_entries, start=1)]
-    summary = (
-        "查询成功!\n"
-        f"关键词: {keyword}\n"
-        f"返回数量: {len(all_entries)}\n\n"
-        f"{'=' * 80}\n\n"
-    )
-    separator = f"\n\n{'-' * 80}\n\n"
-    return summary + separator.join(entry_infos)
+    return [_extract_entry_info(entry) for entry in all_entries]
 
 
-def search_vector_backend(keyword: str, tool_name: str = "vector_search") -> str:
+def search_vector_backend(keyword: str, tool_name: str = "vector_search", spacecode: list[str] | None = None) -> str:
     config = get_vector_search_config(tool_name)
     if not config.api_url:
         raise ValueError("VECTOR_SEARCH_API_URL, PRODUCT_SEARCH_API_URL, or EUVD_API_URL is required. Set it in config.yaml or the environment.")
@@ -104,7 +91,7 @@ def search_vector_backend(keyword: str, tool_name: str = "vector_search") -> str
         config.api_url,
         headers=config.headers,
         cookies=config.cookies,
-        json=_build_request_body(keyword, config),
+        json=_build_request_body(keyword, config, space_codes=spacecode),
         timeout=config.timeout,
     )
     response.raise_for_status()
@@ -115,11 +102,12 @@ def search_vector_backend(keyword: str, tool_name: str = "vector_search") -> str
     except ValueError as exc:
         raise ValueError(f"vector search returned invalid JSON: {exc}") from exc
 
-    return _extract_results(payload, keyword)
+    results = _extract_results(payload, keyword)
+    return json.dumps(results, indent=2, ensure_ascii=False)
 
 
 @tool("vector_search", parse_docstring=True)
-def vector_search_tool(keyword: str) -> str:
+def vector_search_tool(keyword: str, spacecode: list[str] | None = None) -> str:
     """Search structured knowledge in the dedicated internal knowledge backend.
 
     Use this as the first search tool for nearly all fact-finding, lookup, explanation,
@@ -139,21 +127,25 @@ def vector_search_tool(keyword: str) -> str:
             high-signal phrases taken from the user's request, such as a topic,
             product, policy, procedure, activity, region, customer segment, or a
             combined query like "理财产品", "信用卡 积分规则", or "深圳分行 特邀活动 奖励".
+        spacecode: Optional list of space codes to narrow the search scope. When
+            provided, overrides the default space codes from configuration, e.g.
+            ["SP0999999"] or ["SP0999999", "SP0888888"]. If not provided, the default
+            space codes from config will be used.
     """
 
     try:
-        return search_vector_backend(keyword)
+        return search_vector_backend(keyword, spacecode=spacecode)
     except requests.Timeout:
         logger.error("Vector search request timed out.", exc_info=True)
-        return "Error: vector search request timed out."
+        return json.dumps([{"error": "vector search request timed out."}], ensure_ascii=False)
     except requests.RequestException as exc:
         logger.error("Vector search request failed: %s", exc, exc_info=True)
-        return f"Error: vector search request failed: {exc}"
+        return json.dumps([{"error": f"vector search request failed: {exc}"}], ensure_ascii=False)
     except ValueError as exc:
-        return f"Error: {exc}"
+        return json.dumps([{"error": f"{exc}"}], ensure_ascii=False)
     except Exception as exc:
         logger.error("Unexpected vector search error: %s", exc, exc_info=True)
-        return f"Error: vector search failed: {exc}"
+        return json.dumps([{"error": f"vector search failed: {exc}"}], ensure_ascii=False)
 
 
 __all__ = ["vector_search_tool", "search_vector_backend"]
