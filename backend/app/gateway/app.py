@@ -24,11 +24,40 @@ from app.gateway.routers import (
 from deerflow.config.app_config import get_app_config
 
 # Configure logging
+class ExtraFormatter(logging.Formatter):
+    """Custom formatter that appends extra fields as key=value pairs."""
+
+    # Standard LogRecord attributes that should NOT be emitted as "extra"
+    _RESERVED = frozenset({
+        "name", "msg", "args", "created", "relativeCreated", "exc_info",
+        "exc_text", "stack_info", "lineno", "funcName", "pathname", "filename",
+        "module", "thread", "threadName", "process", "processName", "levelname",
+        "levelno", "message", "msecs", "taskName",
+    })
+
+    def format(self, record: logging.LogRecord) -> str:
+        msg = super().format(record)
+        extra_parts: list[str] = []
+        for key, value in record.__dict__.items():
+            if key not in self._RESERVED and not key.startswith("_"):
+                extra_parts.append(f"{key}={value}")
+        if extra_parts:
+            msg += "  " + " ".join(extra_parts)
+        return msg
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+# Replace default handler's formatter with ExtraFormatter so that
+# logger.info("msg", extra={...}) fields are visible in plain-text logs.
+for _h in logging.root.handlers:
+    _h.setFormatter(ExtraFormatter(
+        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
 
 logger = logging.getLogger(__name__)
 
