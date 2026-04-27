@@ -1,4 +1,6 @@
+import datetime
 import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -23,7 +25,9 @@ from app.gateway.routers import (
 )
 from deerflow.config.app_config import get_app_config
 
-# Configure logging
+# ── Logging helpers ─────────────────────────────────────────────────────────
+
+
 class ExtraFormatter(logging.Formatter):
     """Custom formatter that appends extra fields as key=value pairs."""
 
@@ -46,20 +50,108 @@ class ExtraFormatter(logging.Formatter):
         return msg
 
 
+class DailyFileHandler(logging.FileHandler):
+    """File handler that creates a new log file each day.
+
+    Unlike ``TimedRotatingFileHandler``, this handler writes to date-stamped
+    files (e.g. ``gateway-2026-04-27.log``) and simply switches to a new file
+    at midnight without renaming the old one.  This makes it safe for use with
+    multiple worker processes (uvicorn ``--workers N``), because there is no
+    cross-process file-rename race.
+
+    Environment variables
+    ---------------------
+    GATEWAY_LOG_DIR   – directory for log files (default: ``/app/logs``)
+    GATEWAY_LOG_DAYS  – number of daily logs to keep (default: ``30``)
+    """
+
+    def __init__(
+        self,
+        directory: str,
+        prefix: str = "gateway",
+        backup_count: int = 30,
+        encoding: str = "utf-8",
+    ):
+        self.directory = directory
+        self.prefix = prefix
+        self.backup_count = backup_count
+        os.makedirs(directory, exist_ok=True)
+        self._current_date = datetime.date.today().strftime("%Y-%m-%d")
+        filepath = os.path.join(directory, f"{prefix}-{self._current_date}.log")
+        super().__init__(filepath, encoding=encoding)
+
+    # ------------------------------------------------------------------
+    def emit(self, record: logging.LogRecord) -> None:
+        today = datetime.date.today().strftime("%Y-%m-%d")
+        if today != self._current_date:
+            self._switch_file(today)
+        super().emit(record)
+
+    def _switch_file(self, new_date: str) -> None:
+        """Close the current file and open a new date-stamped one."""
+        self.close()
+        self._current_date = new_date
+        self.baseFilename = os.path.join(
+            self.directory, f"{self.prefix}-{new_date}.log"
+        )
+        self.stream = self._open()
+        self._cleanup_old_files()
+
+    def _cleanup_old_files(self) -> None:
+        """Remove log files older than *backup_count* days."""
+        if self.backup_count <= 0:
+            return
+        cutoff = (
+            datetime.date.today() - datetime.timedelta(days=self.backup_count)
+        ).strftime("%Y-%m-%d")
+        try:
+            for fname in os.listdir(self.directory):
+                if fname.startswith(self.prefix + "-") and fname.endswith(".log"):
+                    date_str = fname[len(self.prefix) + 1 : -4]
+                    if date_str < cutoff:
+                        os.remove(os.path.join(self.directory, fname))
+        except OSError:
+            pass
+
+
+# ── Root logger setup ───────────────────────────────────────────────────────
+
+_LOG_FMT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+_LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+    format=_LOG_FMT,
+    datefmt=_LOG_DATEFMT,
 )
+
 # Replace default handler's formatter with ExtraFormatter so that
 # logger.info("msg", extra={...}) fields are visible in plain-text logs.
 for _h in logging.root.handlers:
-    _h.setFormatter(ExtraFormatter(
-        fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    ))
+    _h.setFormatter(ExtraFormatter(fmt=_LOG_FMT, datefmt=_LOG_DATEFMT))
+
+# Add a DailyFileHandler when GATEWAY_LOG_DIR is set.
+# This is enabled automatically in Docker and serve.sh deployments.
+_daily_handler: DailyFileHandler | None = None
+_log_dir = os.environ.get("GATEWAY_LOG_DIR")
+if _log_dir:
+    _backup = int(os.environ.get("GATEWAY_LOG_DAYS", "30"))
+    _daily_handler = DailyFileHandler(
+        directory=_log_dir, prefix="gateway", backup_count=_backup
+    )
+    _daily_handler.setFormatter(ExtraFormatter(fmt=_LOG_FMT, datefmt=_LOG_DATEFMT))
+    logging.root.addHandler(_daily_handler)
+    # Also attach to uvicorn loggers so access/error logs are captured.
+    for _logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logging.getLogger(_logger_name).addHandler(_daily_handler)
 
 logger = logging.getLogger(__name__)
+if _daily_handler:
+    logger.info(
+        "Daily log rotation enabled: dir=%s, backup_count=%d",
+        _log_dir,
+        _backup,
+    )
 
 
 @asynccontextmanager
