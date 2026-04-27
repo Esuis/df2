@@ -23,6 +23,7 @@ Configuration example (``config.yaml``)::
         api_key_url: http://eaip-ellm-1.bocomm.com/ELLM.ELLM-OMSERVICE.V-1.0/createSceneApiKey.do
         scene_code: P2024146
         api_key_refresh_interval: 1800
+        api_key_refresh_ahead: 300
         max_tokens: 4096
         temperature: 0.7
 """
@@ -61,12 +62,15 @@ class EllmChatModel(ChatOpenAI):
       (e.g. ``P2024146``)
     - ``api_key_refresh_interval``: How often (in seconds) to refresh the key.
       Defaults to 1800 (30 minutes).
+    - ``api_key_refresh_ahead``: How many seconds before expiry to trigger a
+      refresh. Defaults to 300 (5 minutes).
     """
 
     # Custom configuration fields
     api_key_url: str = ""
     scene_code: str = ""
     api_key_refresh_interval: int = 1800
+    api_key_refresh_ahead: int = 300
 
     # 必须在父类初始化校验前就存在一个占位 api_key
     openai_api_key: SecretStr = Field(
@@ -90,6 +94,7 @@ class EllmChatModel(ChatOpenAI):
             api_key_url=self.api_key_url,
             scene_code=self.scene_code,
             refresh_interval=self.api_key_refresh_interval,
+            refresh_ahead=self.api_key_refresh_ahead,
         )
 
         # Start the manager (initial key fetch + background refresh thread)
