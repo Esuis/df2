@@ -27,12 +27,30 @@ class ToolLoggingMiddleware(AgentMiddleware[ThreadState]):
 
     state_schema = ThreadState
 
+    @staticmethod
+    def _get_thread_id(request: ToolCallRequest) -> str | None:
+        """从 request.runtime 中获取 thread_id
+        
+        优先从 runtime.context 获取，回退到 runtime.config.configurable。
+        """
+        runtime = request.runtime
+        if runtime is None:
+            return None
+        ctx = getattr(runtime, "context", None) or {}
+        thread_id = ctx.get("thread_id") if isinstance(ctx, dict) else None
+        if thread_id is None:
+            cfg = getattr(runtime, "config", None) or {}
+            thread_id = cfg.get("configurable", {}).get("thread_id")
+        return thread_id
+
     def _log_tool_call(self, request: ToolCallRequest, phase: str, **extra):
         """记录工具调用日志"""
         tool_name = request.tool_call.get("name", "unknown")
         tool_args = request.tool_call.get("args", {})
+        thread_id = self._get_thread_id(request)
         
         logger.info(f"tool.{phase}", extra={
+            "thread_id": thread_id or "unknown",
             "tool_name": tool_name,
             "tool_args": tool_args,
             **extra
