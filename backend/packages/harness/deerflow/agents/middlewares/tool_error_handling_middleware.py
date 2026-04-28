@@ -119,8 +119,10 @@ def _build_runtime_middlewares(
         middlewares.append(GuardrailMiddleware(provider, fail_closed=guardrails_config.fail_closed, passport=guardrails_config.passport))
 
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
+    from deerflow.agents.middlewares.spacecode_override_middleware import SpacecodeOverrideMiddleware
 
     middlewares.append(SandboxAuditMiddleware())
+    middlewares.append(SpacecodeOverrideMiddleware())
     middlewares.append(ToolErrorHandlingMiddleware())
     return middlewares
 
