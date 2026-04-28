@@ -1,11 +1,11 @@
-"""SpacecodeOverrideMiddleware - 拦截 personal_search 工具调用，用文件中的 space_code 强制覆盖 space_code 参数。
+"""SpacecodeOverrideMiddleware - 拦截 personal_search 工具调用，用文件中的 space_code_id 和 space_code 强制覆盖参数。
 
-当模型调用 personal_search 时，有时会填充错误的 space_code。
-本中间件在工具执行前从线程目录下的 custom_params.json 文件中读取 space_code，
-覆盖模型生成的 space_code 参数，确保搜索请求使用正确的知识空间代码。
+当模型调用 personal_search 时，有时会填充错误的 space_code_id 或 space_code。
+本中间件在工具执行前从线程目录下的 custom_params.json 文件中读取 space_code_id 和 space_code，
+覆盖模型生成的参数，确保搜索请求使用正确的知识空间代码。
 
 文件路径: {base_dir}/threads/{thread_id}/custom_params.json
-文件格式: {"vector_search_switch": true, "online_search_switch": false, "space_code": ["SP0999999"]}
+文件格式: {"vector_search_switch": true, "online_search_switch": false, "psnlSpaceCodeId": "fcd15f6e...", "space_code": ["CATE799337027285893"]}
 """
 
 import json
@@ -28,12 +28,12 @@ _CUSTOM_PARAMS_FILENAME = "custom_params.json"
 
 
 class SpacecodeOverrideMiddleware(AgentMiddleware[ThreadState]):
-    """拦截 personal_search 工具调用，用文件中的 space_code 覆盖 space_code。
+    """拦截 personal_search 工具调用，用文件中的 space_code_id 和 space_code 覆盖参数。
 
     数据流:
         线程目录 custom_params.json 文件
           → get_paths().thread_dir(thread_id) / "custom_params.json"
-            → 本中间件读取 space_code 并覆盖 tool_call.args["space_code"]
+            → 本中间件读取 space_code_id 和 space_code 并覆盖 tool_call.args
     """
 
     state_schema = ThreadState
@@ -53,6 +53,48 @@ class SpacecodeOverrideMiddleware(AgentMiddleware[ThreadState]):
             cfg = getattr(runtime, "config", None) or {}
             thread_id = cfg.get("configurable", {}).get("thread_id")
         return thread_id
+
+    @staticmethod
+    def _read_space_code_id_from_file(thread_id: str) -> str | None:
+        """从线程目录的 custom_params.json 文件中读取 space_code_id。
+
+        Args:
+            thread_id: 线程 ID，用于定位线程目录。
+
+        Returns:
+            space_code_id 字符串，文件不存在或无 space_code_id 时返回 None。
+        """
+        try:
+            paths = get_paths()
+            params_file = paths.thread_dir(thread_id) / _CUSTOM_PARAMS_FILENAME
+        except (ValueError, OSError) as exc:
+            logger.warning("SpacecodeOverride: 无法构建线程目录路径 thread_id=%s: %s", thread_id, exc)
+            return None
+
+        if not params_file.is_file():
+            logger.debug("SpacecodeOverride: 文件不存在 %s，跳过 space_code_id 覆盖", params_file)
+            return None
+
+        try:
+            raw = params_file.read_text(encoding="utf-8")
+            data: dict[str, Any] = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("SpacecodeOverride: 读取或解析文件失败 %s: %s", params_file, exc)
+            return None
+
+        space_code_id = data.get("psnlSpaceCodeId")
+        if space_code_id is None:
+            logger.debug("SpacecodeOverride: 文件 %s 中无 psnlSpaceCodeId 字段，跳过覆盖", params_file)
+            return None
+
+        if isinstance(space_code_id, str):
+            return space_code_id
+
+        logger.warning(
+            "SpacecodeOverride: space_code_id 类型不支持: %s，期望 str，跳过覆盖",
+            type(space_code_id).__name__,
+        )
+        return None
 
     @staticmethod
     def _read_space_code_from_file(thread_id: str) -> list[str] | None:
@@ -100,7 +142,7 @@ class SpacecodeOverrideMiddleware(AgentMiddleware[ThreadState]):
         return None
 
     def _maybe_override(self, request: ToolCallRequest) -> None:
-        """若工具为 personal_search 且文件中存在有效 space_code，则覆盖参数。"""
+        """若工具为 personal_search 且文件中存在有效 space_code_id/space_code，则覆盖参数。"""
         tool_name = request.tool_call.get("name")
         if tool_name != _TARGET_TOOL_NAME:
             return
@@ -110,20 +152,33 @@ class SpacecodeOverrideMiddleware(AgentMiddleware[ThreadState]):
             logger.debug("SpacecodeOverride: 无法获取 thread_id，跳过覆盖")
             return
 
-        normalised = self._read_space_code_from_file(thread_id)
-        if normalised is None:
-            return
-
         args = request.tool_call.setdefault("args", {})
-        original = args.get("space_code")
-        args["space_code"] = normalised
-        logger.info(
-            "SpacecodeOverride: thread_id=%s tool_name=%s 覆盖 space_code: %s → %s",
-            thread_id,
-            tool_name,
-            original,
-            normalised,
-        )
+
+        # 覆盖 space_code_id
+        space_code_id_from_file = self._read_space_code_id_from_file(thread_id)
+        if space_code_id_from_file is not None:
+            original_id = args.get("space_code_id")
+            args["space_code_id"] = space_code_id_from_file
+            logger.info(
+                "SpacecodeOverride: thread_id=%s tool_name=%s 覆盖 space_code_id: %s → %s",
+                thread_id,
+                tool_name,
+                original_id,
+                space_code_id_from_file,
+            )
+
+        # 覆盖 space_code
+        normalised = self._read_space_code_from_file(thread_id)
+        if normalised is not None:
+            original = args.get("space_code")
+            args["space_code"] = normalised
+            logger.info(
+                "SpacecodeOverride: thread_id=%s tool_name=%s 覆盖 space_code: %s → %s",
+                thread_id,
+                tool_name,
+                original,
+                normalised,
+            )
 
     @override
     def wrap_tool_call(
