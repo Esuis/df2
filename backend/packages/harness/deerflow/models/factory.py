@@ -31,11 +31,14 @@ def _vllm_disable_chat_template_kwargs(chat_template_kwargs: dict) -> dict:
     return disable_kwargs
 
 
-def create_chat_model(name: str | None = None, thinking_enabled: bool = False, **kwargs) -> BaseChatModel:
+def create_chat_model(name: str | None = None, thinking_enabled: bool = False, runtime_model_override: str | None = None, **kwargs) -> BaseChatModel:
     """Create a chat model instance from the config.
 
     Args:
         name: The name of the model to create. If None, the first model in the config will be used.
+        thinking_enabled: Whether thinking mode is enabled.
+        runtime_model_override: If provided and the model is marked as dynamic_model, override
+            the ``model`` field in ModelConfig with this value.
 
     Returns:
         A chat model instance.
@@ -46,6 +49,11 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     model_config = config.get_model_config(name)
     if model_config is None:
         raise ValueError(f"Model {name} not found in config") from None
+
+    # Dynamic model: override the model field at runtime
+    if model_config.dynamic_model and runtime_model_override:
+        model_config = model_config.model_copy(update={"model": runtime_model_override})
+
     model_class = resolve_class(model_config.use, BaseChatModel)
     model_settings_from_config = model_config.model_dump(
         exclude_none=True,
@@ -59,6 +67,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "when_thinking_enabled",
             "thinking",
             "supports_vision",
+            "dynamic_model",
         },
     )
     # Compute effective when_thinking_enabled by merging in the `thinking` shortcut field.

@@ -34,6 +34,13 @@ def _resolve_model_name(requested_model_name: str | None = None) -> str:
     if requested_model_name and app_config.get_model_config(requested_model_name):
         return requested_model_name
 
+    # Not found in config — check for a dynamic model entry
+    if requested_model_name:
+        dynamic_config = app_config.get_dynamic_model_config()
+        if dynamic_config:
+            logger.info(f"Model '{requested_model_name}' not found in config; routing to dynamic model entry '{dynamic_config.name}'.")
+            return dynamic_config.name
+
     if requested_model_name and requested_model_name != default_model_name:
         logger.warning(f"Model '{requested_model_name}' not found in config; fallback to default model '{default_model_name}'.")
     return default_model_name
@@ -206,7 +213,7 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 # ViewImageMiddleware should be before ClarificationMiddleware to inject image details before LLM
 # ToolErrorHandlingMiddleware should be before ClarificationMiddleware to convert tool exceptions to ToolMessages
 # ClarificationMiddleware should be last to intercept clarification requests after model calls
-def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_name: str | None = None, custom_middlewares: list[AgentMiddleware] | None = None):
+def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_name: str | None = None, custom_middlewares: list[AgentMiddleware] | None = None, runtime_supports_vision: bool | None = None):
     """Build middleware chain based on runtime configuration.
 
     Args:
@@ -242,9 +249,11 @@ def _build_middlewares(config: RunnableConfig, model_name: str | None, agent_nam
 
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
+    # Prefer runtime_supports_vision override (from dynamic model request) over config value.
     app_config = get_app_config()
     model_config = app_config.get_model_config(model_name) if model_name else None
-    if model_config is not None and model_config.supports_vision:
+    effective_supports_vision = runtime_supports_vision if runtime_supports_vision is not None else (model_config.supports_vision if model_config else False)
+    if effective_supports_vision:
         middlewares.append(ViewImageMiddleware())
 
     # Add DeferredToolFilterMiddleware to hide deferred tool schemas from model binding
@@ -283,7 +292,8 @@ def make_lead_agent(config: RunnableConfig):
 
     thinking_enabled = cfg.get("thinking_enabled", True)
     reasoning_effort = cfg.get("reasoning_effort", None)
-    requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
+    requested_model_name: str | None = cfg.get("vllm_model_name") or cfg.get("model")
+    runtime_supports_vision: bool | None = cfg.get("vllm_supports_vision")
     is_plan_mode = cfg.get("is_plan_mode", False)
     subagent_enabled = cfg.get("subagent_enabled", False)
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
@@ -295,13 +305,26 @@ def make_lead_agent(config: RunnableConfig):
     agent_model_name = agent_config.model if agent_config and agent_config.model else _resolve_model_name()
 
     # Final model name resolution with request override, then agent config, then global default
-    model_name = requested_model_name or agent_model_name
+    # requested_model_name could be an actual model ID (e.g. "Qwen3-235B-A22B") that does not
+    # match any config entry — _resolve_model_name will route it to a dynamic_model entry.
+    model_name = _resolve_model_name(requested_model_name or agent_model_name)
 
     app_config = get_app_config()
     model_config = app_config.get_model_config(model_name) if model_name else None
 
     if model_config is None:
         raise ValueError("No chat model could be resolved. Please configure at least one model in config.yaml or provide a valid 'model_name'/'model' in the request.")
+
+    # Determine runtime overrides for dynamic models
+    runtime_model_override: str | None = None
+    effective_supports_vision: bool = model_config.supports_vision
+
+    if model_config.dynamic_model and requested_model_name:
+        # The requested_model_name is the actual model ID — override the config placeholder
+        runtime_model_override = requested_model_name
+        if runtime_supports_vision is not None:
+            effective_supports_vision = runtime_supports_vision
+
     if thinking_enabled and not model_config.supports_thinking:
         logger.warning(f"Thinking mode is enabled but model '{model_name}' does not support it; fallback to non-thinking mode.")
         thinking_enabled = False
@@ -329,24 +352,26 @@ def make_lead_agent(config: RunnableConfig):
             "reasoning_effort": reasoning_effort,
             "is_plan_mode": is_plan_mode,
             "subagent_enabled": subagent_enabled,
+            "runtime_model_override": runtime_model_override,
+            "runtime_supports_vision": effective_supports_vision,
         }
     )
 
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
         return create_agent(
-            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
-            tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled) + [setup_agent],
-            middleware=_build_middlewares(config, model_name=model_name),
+            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, runtime_model_override=runtime_model_override),
+            tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, runtime_supports_vision=effective_supports_vision) + [setup_agent],
+            middleware=_build_middlewares(config, model_name=model_name, runtime_supports_vision=effective_supports_vision),
             system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"])),
             state_schema=ThreadState,
         )
 
     # Default lead agent (unchanged behavior)
     return create_agent(
-        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort),
-        tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled),
-        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name),
+        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, runtime_model_override=runtime_model_override),
+        tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, runtime_supports_vision=effective_supports_vision),
+        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, runtime_supports_vision=effective_supports_vision),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, agent_name=agent_name, available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None
         ),

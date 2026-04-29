@@ -28,6 +28,7 @@ class ModelConfig(BaseModel):
         description="Extra settings to be passed to the model when thinking is enabled",
     )
     supports_vision: bool = Field(default_factory=lambda: False, description="Whether the model supports vision/image inputs")
+    dynamic_model: bool = Field(default=False, description="If true, the 'model' field is a placeholder and will be overridden at runtime from the request")
     thinking: dict | None = Field(
         default_factory=lambda: None,
         description=(

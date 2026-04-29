@@ -228,6 +228,14 @@ class AppConfig(BaseModel):
         """
         return next((model for model in self.models if model.name == name), None)
 
+    def get_dynamic_model_config(self) -> ModelConfig | None:
+        """Get the model config marked as dynamic_model=True, if any.
+
+        Returns:
+            The first dynamic model config if found, otherwise None.
+        """
+        return next((model for model in self.models if model.dynamic_model), None)
+
     def get_tool_config(self, name: str) -> ToolConfig | None:
         """Get the tool config by name.
 

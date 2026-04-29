@@ -15,6 +15,7 @@ class ModelResponse(BaseModel):
     description: str | None = Field(None, description="Model description")
     supports_thinking: bool = Field(default=False, description="Whether model supports thinking mode")
     supports_reasoning_effort: bool = Field(default=False, description="Whether model supports reasoning effort")
+    dynamic_model: bool = Field(default=False, description="Whether the model name is dynamically overridden at runtime")
 
 
 class ModelsListResponse(BaseModel):
@@ -67,6 +68,7 @@ async def list_models() -> ModelsListResponse:
             description=model.description,
             supports_thinking=model.supports_thinking,
             supports_reasoning_effort=model.supports_reasoning_effort,
+            dynamic_model=model.dynamic_model,
         )
         for model in config.models
     ]
@@ -113,4 +115,5 @@ async def get_model(model_name: str) -> ModelResponse:
         description=model.description,
         supports_thinking=model.supports_thinking,
         supports_reasoning_effort=model.supports_reasoning_effort,
+        dynamic_model=model.dynamic_model,
     )

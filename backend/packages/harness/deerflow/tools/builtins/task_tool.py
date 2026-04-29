@@ -88,6 +88,8 @@ async def task_tool(
     thread_id = None
     parent_model = None
     trace_id = None
+    runtime_model_override = None
+    runtime_supports_vision = None
 
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")
@@ -99,6 +101,8 @@ async def task_tool(
         # Try to get parent model from configurable
         metadata = runtime.config.get("metadata", {})
         parent_model = metadata.get("model_name")
+        runtime_model_override = metadata.get("runtime_model_override")
+        runtime_supports_vision = metadata.get("runtime_supports_vision")
 
         # Get or generate trace_id for distributed tracing
         trace_id = metadata.get("trace_id") or str(uuid.uuid4())[:8]
@@ -108,7 +112,7 @@ async def task_tool(
     from deerflow.tools import get_available_tools
 
     # Subagents should not have subagent tools enabled (prevent recursive nesting)
-    tools = get_available_tools(model_name=parent_model, subagent_enabled=False)
+    tools = get_available_tools(model_name=parent_model, subagent_enabled=False, runtime_supports_vision=runtime_supports_vision)
 
     # Create executor
     executor = SubagentExecutor(
@@ -119,6 +123,7 @@ async def task_tool(
         thread_data=thread_data,
         thread_id=thread_id,
         trace_id=trace_id,
+        runtime_model_override=runtime_model_override,
     )
 
     # Start background execution (always async to prevent blocking)

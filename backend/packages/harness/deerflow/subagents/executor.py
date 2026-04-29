@@ -134,6 +134,7 @@ class SubagentExecutor:
         thread_data: ThreadDataState | None = None,
         thread_id: str | None = None,
         trace_id: str | None = None,
+        runtime_model_override: str | None = None,
     ):
         """Initialize the executor.
 
@@ -145,9 +146,12 @@ class SubagentExecutor:
             thread_data: Thread data from parent agent.
             thread_id: Thread ID for sandbox operations.
             trace_id: Trace ID from parent for distributed tracing.
+            runtime_model_override: If the parent uses a dynamic model, pass through
+                the actual model ID so the subagent also uses it.
         """
         self.config = config
         self.parent_model = parent_model
+        self.runtime_model_override = runtime_model_override
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
         self.thread_id = thread_id
@@ -166,7 +170,7 @@ class SubagentExecutor:
     def _create_agent(self):
         """Create the agent instance."""
         model_name = _get_model_name(self.config, self.parent_model)
-        model = create_chat_model(name=model_name, thinking_enabled=False)
+        model = create_chat_model(name=model_name, thinking_enabled=False, runtime_model_override=self.runtime_model_override)
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
