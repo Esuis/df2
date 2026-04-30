@@ -22,6 +22,7 @@ class LLMLoggerCallback(BaseCallbackHandler):
         self._start_times: dict[UUID | str, float] = {}
         self._accumulated_outputs: dict[UUID | str, list[str]] = {}
         self._model_names: dict[UUID | str, str] = {}
+        self._actual_model_names: dict[UUID | str, str] = {}
 
     @staticmethod
     def _get_thread_id() -> str | None:
@@ -41,6 +42,7 @@ class LLMLoggerCallback(BaseCallbackHandler):
         """LLM 调用开始时记录输入"""
         run_id = kwargs.get("run_id")
         model_name = serialized.get("name", "unknown")
+        actual_model = kwargs.get("invocation_params", {}).get("model_name") or model_name
 
         if run_id is not None:
             # 正常路径：run_id 唯一标识此次调用
@@ -49,11 +51,12 @@ class LLMLoggerCallback(BaseCallbackHandler):
             # 回退：无 run_id 时用 model_name 作 key（可通过 response.llm_output 回溯）
             key = model_name
 
-        logger.info(f"LLM 调用开始 run_id：{key}")
+        logger.info(f"LLM 调用开始 run_id：{key} actual_model：{actual_model}")
 
         self._start_times[key] = time.time()
         self._accumulated_outputs[key] = []
         self._model_names[key] = model_name
+        self._actual_model_names[key] = actual_model
 
         
         # 记录输入内容
@@ -63,6 +66,7 @@ class LLMLoggerCallback(BaseCallbackHandler):
         logger.info("llm.invoke.start", extra={
             "thread_id": thread_id or "unknown",
             "model_name": model_name,
+            "actual_model": actual_model,
             "prompts_count": len(prompts),
             "input_content": input_content,
         })
@@ -88,6 +92,7 @@ class LLMLoggerCallback(BaseCallbackHandler):
         start_time = self._start_times.pop(run_id, None) if run_id is not None else None
         accumulated = self._accumulated_outputs.pop(run_id, []) if run_id is not None else []
         model_name = self._model_names.pop(run_id, None) if run_id is not None else None
+        actual_model = self._actual_model_names.pop(run_id, None) if run_id is not None else None
 
         # 2. 回退：用 response.llm_output 中的 model_name 匹配
         if start_time is None:
@@ -99,6 +104,7 @@ class LLMLoggerCallback(BaseCallbackHandler):
                 start_time = self._start_times.pop(fallback_name)
                 accumulated = self._accumulated_outputs.pop(fallback_name, [])
                 model_name = self._model_names.pop(fallback_name, None)
+                actual_model = self._actual_model_names.pop(fallback_name, None)
         
         # 3. 最后回退：使用任意一个剩余条目
         if start_time is None and self._start_times:
@@ -106,6 +112,7 @@ class LLMLoggerCallback(BaseCallbackHandler):
             start_time = self._start_times.pop(key)
             accumulated = self._accumulated_outputs.pop(key, [])
             model_name = self._model_names.pop(key, None)
+            actual_model = self._actual_model_names.pop(key, None)
         
         duration_ms = (time.time() - start_time) * 1000 if start_time else 0
         token_usage = response.llm_output.get("token_usage", {}) if response.llm_output else {}
@@ -129,6 +136,7 @@ class LLMLoggerCallback(BaseCallbackHandler):
         logger.info("llm.invoke.end", extra={
             "thread_id": thread_id or "unknown",
             "model_name": model_name or "unknown",
+            "actual_model": actual_model or "unknown",
             "duration_ms": round(duration_ms, 2),
             "prompt_tokens": token_usage.get("prompt_tokens"),
             "completion_tokens": token_usage.get("completion_tokens"),
@@ -141,6 +149,9 @@ class LLMLoggerCallback(BaseCallbackHandler):
         """LLM 调用出错时记录错误"""
         run_id = kwargs.get("run_id")
         
+        # 在清理前提取 actual_model
+        actual_model = self._actual_model_names.pop(run_id, "unknown") if run_id is not None else "unknown"
+        
         # 清理该调用对应的缓冲区
         if run_id is not None:
             self._start_times.pop(run_id, None)
@@ -151,10 +162,12 @@ class LLMLoggerCallback(BaseCallbackHandler):
             self._start_times.clear()
             self._accumulated_outputs.clear()
             self._model_names.clear()
+            self._actual_model_names.clear()
         
         thread_id = self._get_thread_id()
         
         logger.error("llm.invoke.error", extra={
             "thread_id": thread_id or "unknown",
             "error": str(error),
+            "actual_model": actual_model,
         })
