@@ -299,6 +299,7 @@ async def start_run(
             "subagent_enabled",
             "max_concurrent_subagents",
             "supports_vision",
+            "custom_params",
         }
         configurable = config.setdefault("configurable", {})
         for key in _CONTEXT_CONFIGURABLE_KEYS:

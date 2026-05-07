@@ -2,6 +2,8 @@ import logging
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware, SummarizationMiddleware
+
+from deerflow.agents.middlewares.chinese_summarization_middleware import ChineseSummarizationMiddleware
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
@@ -20,9 +22,56 @@ from deerflow.config.agents_config import load_agent_config
 from deerflow.config.app_config import get_app_config
 from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
-
+from deerflow.config.paths import get_paths
 logger = logging.getLogger(__name__)
 
+# def _custom_params_path(thread_id: str):
+#     """Return the path to the per-thread custom_params JSON file."""
+#     return get_paths().thread_dir(thread_id) / "custom_params.json"
+
+
+# def _save_custom_params(thread_id: str, params: dict) -> None:
+#     """Persist customParams for *thread_id* to disk."""
+#     try:
+#         path = _custom_params_path(thread_id)
+#         path.parent.mkdir(parents=True, exist_ok=True)
+#         path.write_text(json.dumps(params, ensure_ascii=False), encoding="utf-8")
+#         logger.debug("Saved customParams for thread %s: %s", thread_id, params)
+#     except Exception:
+#         logger.warning("Failed to save customParams for thread %s (non-fatal)", thread_id, exc_info=True)
+
+
+# def _load_custom_params(thread_id: str) -> dict | None:
+#     """Load persisted customParams for *thread_id* from disk."""
+#     try:
+#         path = _custom_params_path(thread_id)
+#         if path.exists():
+#             data = json.loads(path.read_text(encoding="utf-8"))
+#             logger.debug("Loaded customParams for thread %s: %s", thread_id, data)
+#             return data
+#     except Exception:
+#         logger.warning("Failed to load customParams for thread %s (non-fatal)", thread_id, exc_info=True)
+#     return None
+
+
+# def _resolve_custom_params(cfg: dict, thread_id: str | None) -> dict | None:
+#     """Resolve customParams: prefer runtime configurable, fall back to persisted file.
+#     When customParams is present in the runtime config (i.e. during a
+#     ``run/stream`` request), it is persisted to disk so that subsequent
+#     state/history reads can recover it.
+#     When customParams is absent (i.e. during a ``state`` or ``history``
+#     read), the persisted file is used as a fallback.
+#     """
+#     custom_params = cfg.get("custom_params")
+#     if custom_params is not None and thread_id:
+#         # Runtime override — persist for future reads
+#         _save_custom_params(thread_id, custom_params)
+#         return custom_params
+
+#     if not custom_params and thread_id:
+#         # No runtime value — try persisted fallback
+#         custom_params = _load_custom_params(thread_id)
+#     return custom_params
 
 def _resolve_model_name(requested_model_name: str | None = None) -> str:
     """Resolve a runtime model name safely, falling back to default if invalid. Returns None if no models are configured."""
@@ -33,13 +82,6 @@ def _resolve_model_name(requested_model_name: str | None = None) -> str:
 
     if requested_model_name and app_config.get_model_config(requested_model_name):
         return requested_model_name
-
-    # Not found in config — check for a dynamic model entry
-    if requested_model_name:
-        dynamic_config = app_config.get_dynamic_model_config()
-        if dynamic_config:
-            logger.info(f"Model '{requested_model_name}' not found in config; routing to dynamic model entry '{dynamic_config.name}'.")
-            return dynamic_config.name
 
     if requested_model_name and requested_model_name != default_model_name:
         logger.warning(f"Model '{requested_model_name}' not found in config; fallback to default model '{default_model_name}'.")
@@ -85,7 +127,7 @@ def _create_summarization_middleware() -> SummarizationMiddleware | None:
     if config.summary_prompt is not None:
         kwargs["summary_prompt"] = config.summary_prompt
 
-    return SummarizationMiddleware(**kwargs)
+    return ChineseSummarizationMiddleware(**kwargs)
 
 
 def _create_todo_list_middleware(is_plan_mode: bool) -> TodoMiddleware | None:
@@ -207,6 +249,7 @@ Being proactive with task management demonstrates thoroughness and ensures all r
 # UploadsMiddleware should be after ThreadDataMiddleware to access thread_id
 # DanglingToolCallMiddleware patches missing ToolMessages before model sees the history
 # SummarizationMiddleware should be early to reduce context before other processing
+# HistoryTrimMiddleware trims previous-turn messages before model invocation (after SummarizationMiddleware)
 # TodoListMiddleware should be before ClarificationMiddleware to allow todo management
 # TitleMiddleware generates title after first exchange
 # MemoryMiddleware queues conversation for memory update (after TitleMiddleware)
@@ -292,21 +335,35 @@ def make_lead_agent(config: RunnableConfig):
 
     thinking_enabled = cfg.get("thinking_enabled", True)
     reasoning_effort = cfg.get("reasoning_effort", None)
-    requested_model_name: str | None = cfg.get("vllm_model_name") or cfg.get("model")
-    runtime_supports_vision: bool | None = cfg.get("vllm_supports_vision")
+    requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
+    # custom_params: dict = cfg.get("custom_params", {})
+    # runtime_model_name: str | None = custom_params.get("llm_model_name")
+    # runtime_supports_vision: bool | None = custom_params.get("llm_supports_vision")
     is_plan_mode = cfg.get("is_plan_mode", False)
     subagent_enabled = cfg.get("subagent_enabled", False)
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
     agent_name = cfg.get("agent_name")
+    thread_id = cfg.get("thread_id")
+
+    # custom_params = _resolve_custom_params(cfg, thread_id)
+    # runtime_model_name: str | None = custom_params.get("llm_model_name")
+    runtime_model_name = None
+    runtime_supports_vision = None
+    # runtime_supports_vision: bool | None = custom_params.get("llm_supports_vision")
+    # logger.info(f"[agent3.py]:custom_params:{custom_params}")
+    # 新增自定义字段
+    # custom_prompt = custom_params.get("custom_prompt",None)
+    # vector_search_switch = custom_params.get("vector_search_switch", True)
+    # online_search_switch = custom_params.get("online_search_switch", False)
+    # personal_search_switch = custom_params.get("personal_search_switch", False)
+    # logger.info(f"[agent4.py]:custom_prompt:, {runtime_model_name}, {runtime_supports_vision}")
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
     # Custom agent model or fallback to global/default model resolution
     agent_model_name = agent_config.model if agent_config and agent_config.model else _resolve_model_name()
 
-    # Final model name resolution with request override, then agent config, then global default
-    # requested_model_name could be an actual model ID (e.g. "Qwen3-235B-A22B") that does not
-    # match any config entry — _resolve_model_name will route it to a dynamic_model entry.
+    # Final model name resolution: requested_model_name is the config entry name
     model_name = _resolve_model_name(requested_model_name or agent_model_name)
 
     app_config = get_app_config()
@@ -319,11 +376,11 @@ def make_lead_agent(config: RunnableConfig):
     runtime_model_override: str | None = None
     effective_supports_vision: bool = model_config.supports_vision
 
-    if model_config.dynamic_model and requested_model_name:
-        # The requested_model_name is the actual model ID — override the config placeholder
-        runtime_model_override = requested_model_name
-        if runtime_supports_vision is not None:
-            effective_supports_vision = runtime_supports_vision
+    # if model_config.dynamic_model and runtime_model_name:
+    #     # Dynamic model: override the config placeholder with the actual model ID from custom_params
+    #     runtime_model_override = runtime_model_name
+    #     if runtime_supports_vision is not None:
+    #         effective_supports_vision = runtime_supports_vision
 
     if thinking_enabled and not model_config.supports_thinking:
         logger.warning(f"Thinking mode is enabled but model '{model_name}' does not support it; fallback to non-thinking mode.")
