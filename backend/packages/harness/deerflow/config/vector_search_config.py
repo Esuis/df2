@@ -38,7 +38,6 @@ class VectorSearchConfig:
     know_status: list[str]
     online_status: list[str]
     kp_status: list[str]
-    muwp_user: dict[str, str]
     trans_process: str
     tran_id: str
     headers: dict[str, str]
@@ -144,16 +143,6 @@ def _coerce_int_list(value: Any, default: list[int]) -> list[int]:
     return list(default)
 
 
-def _default_muwp_user() -> dict[str, str]:
-    return {
-        "muwp_branchID": os.getenv("MUWP_BRANCH_ID", "1000027159"),
-        "muwp_loginName": os.getenv("MUWP_LOGIN_NAME", "xuew_4"),
-        "muwp_userCode": os.getenv("MUWP_USER_CODE", "9743616"),
-        "muwp_userName": os.getenv("MUWP_USER_NAME", "薛巍"),
-        "muwp_userID": os.getenv("MUWP_USER_ID", "132298"),
-    }
-
-
 def get_vector_search_config(tool_name: str = "vector_search") -> VectorSearchConfig:
     """Resolve the vector search config from tool config, top-level config, and env vars."""
 
@@ -227,12 +216,6 @@ def get_vector_search_config(tool_name: str = "vector_search") -> VectorSearchCo
         section.get("kpStatus", MISSING),
         section.get("kp_status", MISSING),
     )
-    muwp_user = _merge_dict_values(
-        _default_muwp_user(),
-        section.get("muwp_user"),
-        tool_extra.get("muwp_user"),
-    )
-
     return VectorSearchConfig(
         api_url=api_url,
         timeout=int(timeout_value),
@@ -267,7 +250,6 @@ def get_vector_search_config(tool_name: str = "vector_search") -> VectorSearchCo
             kp_status_value,
             ["3", "4"],
         ),
-        muwp_user=muwp_user,
         trans_process=str(tool_extra.get("trans_process") or section.get("trans_process") or ""),
         tran_id=str(tool_extra.get("tran_id") or section.get("tran_id") or ""),
         headers=_merge_dict_values(

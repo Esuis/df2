@@ -8,12 +8,14 @@ import requests
 from langchain.tools import tool
 
 from deerflow.config.vector_search_config import VectorSearchConfig, get_vector_search_config
+from deerflow.community.common.auth_context import get_resolved_auth
 
 logger = logging.getLogger(__name__)
 
 
 def _build_request_body(keyword: str, config: VectorSearchConfig) -> dict[str, Any]:
-    return {
+    auth = get_resolved_auth()
+    body: dict[str, Any] = {
         "REQ_HEAD": {
             "TRANS_PROCESS": config.trans_process,
             "TRAN_ID": config.tran_id,
@@ -37,9 +39,11 @@ def _build_request_body(keyword: str, config: VectorSearchConfig) -> dict[str, A
                     "kpStatus": config.kp_status,
                 },
             },
-            "muwpUser": config.muwp_user,
         },
     }
+    if auth.auth_mode == "muwp-user" and auth.muwp_user:
+        body["REQ_BODY"]["muwpUser"] = auth.muwp_user
+    return body
 
 
 def _extract_entry_info(entry: dict[str, Any]) -> dict[str, Any]:
@@ -86,9 +90,20 @@ def search_vector_backend(keyword: str, tool_name: str = "vector_search") -> str
     if not config.api_url:
         raise ValueError("VECTOR_SEARCH_API_URL, PRODUCT_SEARCH_API_URL, or EUVD_API_URL is required. Set it in config.yaml or the environment.")
 
+    headers = dict(config.headers)
+    # 根据 auth context 添加认证请求头
+    auth = get_resolved_auth()
+    if auth.auth_mode == "guwp-token":
+        headers["guwp-token"] = auth.guwp_token
+    elif auth.auth_mode == "jrt-auth-code":
+        headers["jrt-auth-code"] = auth.jrt_auth_code
+    elif auth.auth_mode == "okic-token":
+        headers["okic-token"] = auth.okic_token
+        headers["okic-type"] = auth.okic_type
+
     response = requests.post(
         config.api_url,
-        headers=config.headers,
+        headers=headers,
         cookies=config.cookies,
         json=_build_request_body(keyword, config),
         timeout=config.timeout,

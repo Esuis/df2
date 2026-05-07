@@ -29,16 +29,6 @@ DEFAULT_PERSONAL_SEARCH_HEADERS = {
 }
 
 
-def _default_muwp_user() -> dict[str, str]:
-    return {
-        "muwp_branchID": os.getenv("MUWP_BRANCH_ID", ""),
-        "muwp_loginName": os.getenv("MUWP_LOGIN_NAME", ""),
-        "muwp_userCode": os.getenv("MUWP_USER_CODE", ""),
-        "muwp_userName": os.getenv("MUWP_USER_NAME", ""),
-        "muwp_userID": os.getenv("MUWP_USER_ID", ""),
-    }
-
-
 @dataclass(frozen=True)
 class PersonalSearchConfig:
     """Resolved personal search configuration."""
@@ -48,7 +38,6 @@ class PersonalSearchConfig:
     source_type: str
     repository: str
     search_type: str
-    muwp_user: dict[str, str]
     headers: dict[str, str]
 
 
@@ -118,13 +107,6 @@ def get_personal_search_config(tool_name: str = "personal_search") -> PersonalSe
 
     timeout_value = tool_extra.get("timeout", section.get("timeout", DEFAULT_PERSONAL_SEARCH_TIMEOUT))
 
-    # muwp_user: 默认值(环境变量) < 顶层配置 < tool config
-    muwp_user = _merge_dict_values(
-        _default_muwp_user(),
-        section.get("muwp_user"),
-        tool_extra.get("muwp_user"),
-    )
-
     # 构建 headers：默认 + 配置合并
     merged_headers = _merge_dict_values(
         DEFAULT_PERSONAL_SEARCH_HEADERS,
@@ -138,7 +120,6 @@ def get_personal_search_config(tool_name: str = "personal_search") -> PersonalSe
         source_type=source_type,
         repository=repository,
         search_type=search_type,
-        muwp_user=muwp_user,
         headers=merged_headers,
     )
 

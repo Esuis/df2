@@ -8,6 +8,7 @@ import requests
 from langchain.tools import tool
 
 from deerflow.config.personal_search_config import PersonalSearchConfig, get_personal_search_config
+from deerflow.community.common.auth_context import get_resolved_auth
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ def _build_request_body(
 
     psnlSpaceCodeId 和 psnlCategoryIdList 仅从工具参数获取，不从配置文件获取。
     """
+    auth = get_resolved_auth()
     inner_param: dict[str, Any] = {}
     if space_code_id:
         inner_param["psnlSpaceCodeId"] = space_code_id
@@ -45,9 +47,11 @@ def _build_request_body(
                 "repository": config.repository,
                 "searchType": config.search_type,
             },
-            "muwpUser": config.muwp_user,
         },
     }
+
+    if auth.auth_mode == "muwp-user" and auth.muwp_user:
+        body["REQ_BODY"]["muwpUser"] = auth.muwp_user
 
     if inner_param:
         body["REQ_BODY"]["param"]["param"] = inner_param
@@ -125,11 +129,22 @@ def search_personal_backend(
 
     body = _build_request_body(keyword, config, space_code_id=space_code_id, space_code=space_code)
 
+    headers = dict(config.headers)
+    # 根据 auth context 添加认证请求头
+    auth = get_resolved_auth()
+    if auth.auth_mode == "guwp-token":
+        headers["guwp-token"] = auth.guwp_token
+    elif auth.auth_mode == "jrt-auth-code":
+        headers["jrt-auth-code"] = auth.jrt_auth_code
+    elif auth.auth_mode == "okic-token":
+        headers["okic-token"] = auth.okic_token
+        headers["okic-type"] = auth.okic_type
+
     # 使用 multipart/form-data 格式：REQ_MESSAGE 字段值为 JSON 字符串
     # requests 的 files 参数可以发送 multipart 表单，(None, value) 表示普通表单字段
     response = requests.post(
         config.api_url,
-        headers=config.headers,
+        headers=headers,
         data={"REQ_MESSAGE": (None, json.dumps(body, ensure_ascii=False))},
         timeout=config.timeout,
     )

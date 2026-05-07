@@ -30,7 +30,6 @@ class CustomSearchConfig:
     max_results: int
     default_repository: str
     repositories: dict[str, CustomSearchRepositoryConfig]
-    muwp_user: dict[str, str]
 
 
 def _get_custom_search_section() -> dict[str, Any]:
@@ -105,16 +104,6 @@ def _parse_repositories(raw_repositories: Any) -> dict[str, CustomSearchReposito
     return repositories or _default_repositories()
 
 
-def _default_muwp_user() -> dict[str, str]:
-    return {
-        "muwp_branchID": os.getenv("MUWP_BRANCH_ID", "1000027159"),
-        "muwp_loginName": os.getenv("MUWP_LOGIN_NAME", "xuew_4"),
-        "muwp_userCode": os.getenv("MUWP_USER_CODE", "9743616"),
-        "muwp_userName": os.getenv("MUWP_USER_NAME", "薛巍"),
-        "muwp_userID": os.getenv("MUWP_USER_ID", "132298"),
-    }
-
-
 def _merge_dict_values(*values: Any) -> dict[str, str]:
     merged: dict[str, str] = {}
     for value in values:
@@ -144,12 +133,6 @@ def get_custom_search_config(tool_name: str = "web_search") -> CustomSearchConfi
     timeout = int(timeout_value)
     max_results = int(max_results_value)
 
-    muwp_user = _merge_dict_values(
-        _default_muwp_user(),
-        section.get("muwp_user"),
-        tool_extra.get("muwp_user"),
-    )
-
     return CustomSearchConfig(
         api_url=api_url,
         api_key=api_key,
@@ -157,7 +140,6 @@ def get_custom_search_config(tool_name: str = "web_search") -> CustomSearchConfi
         max_results=max_results,
         default_repository=default_repository,
         repositories=repositories,
-        muwp_user=muwp_user,
     )
 
 

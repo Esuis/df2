@@ -8,6 +8,7 @@ import requests
 from langchain.tools import tool
 
 from deerflow.config.custom_search_config import CustomSearchRepositoryConfig, get_custom_search_config, get_custom_search_repository_choices
+from deerflow.community.common.auth_context import get_resolved_auth
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +36,9 @@ def _resolve_repository(repository_id: str | None, tool_name: str = "web_search"
     return next(iter(config.repositories.values()))
 
 
-def _build_payload(query: str, repository: CustomSearchRepositoryConfig, muwp_user: dict[str, str]) -> dict[str, Any]:
-    return {
+def _build_payload(query: str, repository: CustomSearchRepositoryConfig) -> dict[str, Any]:
+    auth = get_resolved_auth()
+    body: dict[str, Any] = {
         "REQ_HEAD": {
             "TRANS_PROCESS": "",
             "TRAN_ID": "",
@@ -54,9 +56,11 @@ def _build_payload(query: str, repository: CustomSearchRepositoryConfig, muwp_us
                     "channelId": repository.channel_id,
                 },
             },
-            "muwpUser": muwp_user,
         },
     }
+    if auth.auth_mode == "muwp-user" and auth.muwp_user:
+        body["REQ_BODY"]["muwpUser"] = auth.muwp_user
+    return body
 
 
 def _parse_response(payload: dict[str, Any], max_results: int) -> list[dict[str, Any]]:
@@ -99,21 +103,30 @@ def search_custom_backend(query: str, repository_id: str | None = None, tool_nam
         raise ValueError("CUSTOM_SEARCH_API_URL is required. Set it in config.yaml or the environment.")
 
     repository = _resolve_repository(repository_id, tool_name=tool_name)
-    headers = {
+    headers: dict[str, str] = {
         "Content-Type": "application/json",
         "Accept": "*/*",
         "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
         "User-Agent": "DeerFlow-CustomSearch/2.0",
-        "jumpCloud-Env": "BASE",
     }
     if config.api_key:
         headers["Authorization"] = f"Bearer {config.api_key}"
 
+    # 根据 auth context 添加认证请求头
+    auth = get_resolved_auth()
+    if auth.auth_mode == "guwp-token":
+        headers["guwp-token"] = auth.guwp_token
+    elif auth.auth_mode == "jrt-auth-code":
+        headers["jrt-auth-code"] = auth.jrt_auth_code
+    elif auth.auth_mode == "okic-token":
+        headers["okic-token"] = auth.okic_token
+        headers["okic-type"] = auth.okic_type
+
     response = requests.post(
         config.api_url,
         headers=headers,
-        json=_build_payload(query, repository, config.muwp_user),
+        json=_build_payload(query, repository),
         timeout=config.timeout,
     )
     response.raise_for_status()
