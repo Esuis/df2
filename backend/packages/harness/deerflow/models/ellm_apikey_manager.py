@@ -98,6 +98,7 @@ class EllmApiKeyManager:
         self._lock = threading.Lock()
         self._refresh_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._reset_event = threading.Event()
         self._started = False
 
         # HTTP client (lazy init)
@@ -295,6 +296,9 @@ class EllmApiKeyManager:
             old_key,
             api_key,
         )
+        # Reset the background refresh timer so the next refresh happens
+        # from now, not from the original schedule.
+        self._reset_event.set()
         return api_key
 
     def _fetch_key_from_server(self) -> str:
@@ -592,22 +596,36 @@ class EllmApiKeyManager:
         return self._http_client
 
     def _refresh_loop(self) -> None:
-        """Background refresh loop that periodically fetches a new key."""
-        while not self._stop_event.is_set():
-            # Sleep for (refresh_interval - refresh_ahead) seconds
-            sleep_duration = max(self._refresh_interval - self._refresh_ahead, 60)
-            if self._stop_event.wait(timeout=sleep_duration):
-                break
+        """Background refresh loop that periodically fetches a new key.
 
-            try:
-                self.refresh_key()
-            except Exception as e:
-                logger.error(
-                    "ELLM ApiKeyManager: background refresh failed "
-                    "(scene_code=%s, error=%s), will retry in next cycle",
-                    self._scene_code,
-                    e,
-                )
+        Supports timer reset via ``_reset_event`` — when ``force_refresh_key()``
+        is called, it sets the event, causing the loop to break out of the
+        current sleep and start a fresh timing cycle.
+        """
+        while not self._stop_event.is_set():
+            sleep_duration = max(self._refresh_interval - self._refresh_ahead, 60)
+            deadline = time.time() + sleep_duration
+
+            # Sleep in 1-second increments, checking for reset/stop
+            while time.time() < deadline:
+                remaining = deadline - time.time()
+                if self._stop_event.wait(timeout=min(1.0, remaining)):
+                    return
+                if self._reset_event.is_set():
+                    self._reset_event.clear()
+                    break  # -> restart the outer loop (new timing cycle)
+            else:
+                # Slept through without interruption -> do the refresh
+                try:
+                    self.refresh_key()
+                except Exception as e:
+                    logger.error(
+                        "ELLM ApiKeyManager: background refresh failed "
+                        "(scene_code=%s, error=%s), will retry in next cycle",
+                        self._scene_code,
+                        e,
+                    )
+            # If we broke out via _reset_event, fall through and restart the outer loop
 
     # --- Testing helpers ---
 
