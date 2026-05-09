@@ -127,7 +127,14 @@ class EllmApiKeyManager:
                     request_timeout=request_timeout,
                 )
                 cls._instances[scene_code] = instance
-            return cls._instances[scene_code]
+            instance = cls._instances[scene_code]
+            logger.info(
+                "EllmApiKeyManager: get_instance (scene_code=%s, pid=%s, id=%s)",
+                scene_code,
+                os.getpid(),
+                id(instance),
+            )
+            return instance
 
     @classmethod
     def get_instance_by_scene_code(cls, scene_code: str) -> EllmApiKeyManager | None:
@@ -247,6 +254,48 @@ class EllmApiKeyManager:
 
         # Step 2: Cache miss or stale — acquire lock and refresh
         return self._acquire_lock_and_refresh()
+
+    def force_refresh_key(self) -> str:
+        """Force refresh the API key, skipping all caches.
+
+        Unlike :meth:`refresh_key`, this method always makes a real HTTP
+        request to the ELLM gateway without attempting to read the shared
+        cache first.  The new key is written to the shared cache so that
+        other processes can benefit from it.
+
+        This is useful when an API call fails with ``invalid_api_key``
+        (HTTP 401), indicating that the cached key has been revoked or
+        has expired server-side.
+
+        Returns:
+            The newly obtained API key string.
+
+        Raises:
+            Exception: If the HTTP request fails or the response is invalid.
+        """
+        old_key = self._current_key
+        logger.warning(
+            "ELLM ApiKeyManager: forcing key refresh (scene_code=%s, pid=%s, old_api_key=%s)",
+            self._scene_code,
+            os.getpid(),
+            old_key,
+        )
+        api_key = self._fetch_key_from_server()
+        # Write to shared cache for other processes
+        with self._lock:
+            self._write_cache(
+                api_key=self._current_key,
+                ttl_ms=self._key_ttl_ms,
+                expiry_time=self._key_expiry_time,
+            )
+        logger.info(
+            "ELLM ApiKeyManager: force refresh complete "
+            "(scene_code=%s, old_api_key=%s, new_api_key=%s)",
+            self._scene_code,
+            old_key,
+            api_key,
+        )
+        return api_key
 
     def _fetch_key_from_server(self) -> str:
         """Pure HTTP fetch — call the ELLM gateway and parse the response.

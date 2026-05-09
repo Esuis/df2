@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import httpx
 from pydantic import Field, SecretStr
 from langchain_core.language_models import LanguageModelInput
 from langchain_openai import ChatOpenAI
@@ -117,6 +118,17 @@ class EllmChatModel(ChatOpenAI):
         )
 
         super().model_post_init(__context)
+
+        # Register httpx event hook to log actual outgoing request headers
+        self.root_client._client.event_hooks.setdefault("request", [])
+        self.root_client._client.event_hooks["request"].append(
+            lambda req: logger.info(
+                "ELLM request: %s %s headers=%s",
+                req.method,
+                req.url,
+                dict(req.headers),
+            )
+        )
 
     def _inject_latest_api_key(self) -> None:
         """Update default_headers with the latest API key from the manager."""

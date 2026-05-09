@@ -1,6 +1,6 @@
 import logging
 import time
-from typing import override
+from typing import Any, override
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 
@@ -17,12 +17,14 @@ class LLMLoggerCallback(BaseCallbackHandler):
     无 run_id 时回退到 model_name 作 key（可通过 response.llm_output 回溯）。
     """
     
-    def __init__(self):
+    def __init__(self, apikey_manager: Any = None):
         # key 优先为 run_id (UUID)，回退为 model_name (str)
         self._start_times: dict[UUID | str, float] = {}
         self._accumulated_outputs: dict[UUID | str, list[str]] = {}
         self._model_names: dict[UUID | str, str] = {}
         self._actual_model_names: dict[UUID | str, str] = {}
+        # 动态 API Key 管理器（可选），用于 401 invalid_api_key 时强制刷新
+        self._apikey_manager = apikey_manager
 
     @staticmethod
     def _get_thread_id() -> str | None:
@@ -146,28 +148,89 @@ class LLMLoggerCallback(BaseCallbackHandler):
 
     @override
     def on_llm_error(self, error: Exception, **kwargs) -> None:
-        """LLM 调用出错时记录错误"""
+        """LLM 调用出错时记录错误，同时检测 invalid_api_key 并强制刷新"""
         run_id = kwargs.get("run_id")
-        
-        # 在清理前提取 actual_model
-        actual_model = self._actual_model_names.pop(run_id, "unknown") if run_id is not None else "unknown"
-        
-        # 清理该调用对应的缓冲区
+
+        # 1. 优先用 run_id 精确匹配 start_time 和 actual_model
+        start_time = self._start_times.pop(run_id, None) if run_id is not None else None
+        actual_model = self._actual_model_names.pop(run_id, None) if run_id is not None else None
+
+        # 2. 回退：使用任意一个剩余条目（无 run_id 或 run_id 未匹配到时）
+        if start_time is None and self._start_times:
+            key = next(iter(self._start_times))
+            start_time = self._start_times.pop(key)
+            actual_model = self._actual_model_names.pop(key, None) or actual_model
+            # 同步清理其他缓冲区
+            self._accumulated_outputs.pop(key, None)
+            self._model_names.pop(key, None)
+
+        # 3. 计算持续时间
+        duration_ms = (time.time() - start_time) * 1000 if start_time else 0
+
+        # 4. 清理该调用对应的缓冲区
         if run_id is not None:
-            self._start_times.pop(run_id, None)
             self._accumulated_outputs.pop(run_id, None)
             self._model_names.pop(run_id, None)
         else:
             # 回退：清理所有缓冲区（无法确定是哪次调用出错）
-            self._start_times.clear()
             self._accumulated_outputs.clear()
             self._model_names.clear()
             self._actual_model_names.clear()
-        
+
         thread_id = self._get_thread_id()
-        
+
         logger.error("llm.invoke.error", extra={
             "thread_id": thread_id or "unknown",
             "error": str(error),
-            "actual_model": actual_model,
+            "actual_model": actual_model or "unknown",
+            "duration_ms": round(duration_ms, 2),
         })
+
+        # 5. 检测 401 + invalid_api_key，强制刷新 API Key
+        if self._is_invalid_api_key_error(error):
+            self._force_refresh_apikey()
+
+    def _is_invalid_api_key_error(self, error: Exception) -> bool:
+        """判断异常是否为 API Key 过期/无效（401 + invalid_api_key）。
+
+        支持两种格式：
+        - 结构化属性：error.status_code == 401 且 error.code == 'invalid_api_key'
+        - 字符串兜底：str(error) 包含 '401' 和 'invalid_api_key'
+        """
+        if self._apikey_manager is None:
+            return False
+
+        # 方式 A：结构化属性检查（原生 openai.AuthenticationError）
+        status_code = getattr(error, 'status_code', None)
+        if status_code == 401:
+            # 通过 body 中的 error.code 确认
+            body = getattr(error, 'body', None) or {}
+            if isinstance(body, dict):
+                err_data = body.get('error', {})
+                if isinstance(err_data, dict) and err_data.get('code') == 'invalid_api_key':
+                    return True
+            # 兜底检查 code 属性（某些 SDK 直接暴露 error.code）
+            if getattr(error, 'code', None) == 'invalid_api_key':
+                return True
+
+        # 方式 B：字符串兜底匹配（兼容 LangChain 包装异常）
+        error_str = str(error)
+        if '401' in error_str and '"code": "invalid_api_key"' in error_str:
+            return True
+
+        return False
+
+    def _force_refresh_apikey(self) -> None:
+        """强制刷新 API Key（跳过缓存，直接向服务器请求）。"""
+        try:
+            logger.warning(
+                "Detected 'invalid_api_key' error (401), forcing API key refresh..."
+            )
+            self._apikey_manager.force_refresh_key()
+            logger.info("API key force refreshed successfully")
+        except Exception as e:
+            logger.error(
+                "Failed to force refresh API key: %s",
+                e,
+                exc_info=True,
+            )

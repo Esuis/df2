@@ -121,14 +121,17 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, r
 
     model_instance = model_class(**kwargs, **model_settings_from_config)
 
+    # 获取动态 API Key 管理器（EllmChatModel 及其子类在 model_post_init 中设置 _key_manager）
+    apikey_manager = getattr(model_instance, '_key_manager', None)
+
     callbacks = build_tracing_callbacks()
     if callbacks:
         existing_callbacks = model_instance.callbacks or []
         model_instance.callbacks = [*existing_callbacks, *callbacks]
         logger.debug(f"Tracing attached to model '{name}' with providers={len(callbacks)}")
-    
+
     # 添加 LLM 调用日志回调
     existing_callbacks = model_instance.callbacks or []
-    model_instance.callbacks = [*existing_callbacks, LLMLoggerCallback()]
+    model_instance.callbacks = [*existing_callbacks, LLMLoggerCallback(apikey_manager=apikey_manager)]
     
     return model_instance
