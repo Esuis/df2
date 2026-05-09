@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_REFRESH_INTERVAL = 1800  # 25 minutes in seconds
 DEFAULT_REFRESH_AHEAD = 300  # Refresh 5 minutes before expiry
 DEFAULT_REQUEST_TIMEOUT = 30  # 30 seconds timeout for key request
+FORCE_REFRESH_COOLDOWN = 5.0  # Cooldown seconds to prevent duplicate force refresh
 
 # Values >= this threshold are treated as Unix timestamps (ms);
 # smaller values are treated as TTL durations (ms).
@@ -95,7 +96,8 @@ class EllmApiKeyManager:
         self._key_obtained_at: float = 0.0  # timestamp when key was obtained
         self._key_ttl_ms: int = 0  # Raw timeToLive value from the response (for logging)
         self._key_expiry_time: float = 0.0  # Absolute Unix timestamp (seconds) when key expires
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._last_force_refresh_at: float = 0.0
         self._refresh_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._reset_event = threading.Event()
@@ -281,14 +283,27 @@ class EllmApiKeyManager:
             os.getpid(),
             old_key,
         )
-        api_key = self._fetch_key_from_server()
-        # Write to shared cache for other processes
+
         with self._lock:
+            # Cooldown check: another thread may have refreshed recently
+            if time.time() - self._last_force_refresh_at < FORCE_REFRESH_COOLDOWN:
+                logger.info(
+                    "ELLM ApiKeyManager: another thread already refreshed recently "
+                    "(scene_code=%s, new_api_key=%s)",
+                    self._scene_code,
+                    self._current_key,
+                )
+                return self._current_key
+
+            api_key = self._fetch_key_from_server()
+            self._last_force_refresh_at = time.time()
+            # Write to shared cache for other processes
             self._write_cache(
                 api_key=self._current_key,
                 ttl_ms=self._key_ttl_ms,
                 expiry_time=self._key_expiry_time,
             )
+
         logger.info(
             "ELLM ApiKeyManager: force refresh complete "
             "(scene_code=%s, old_api_key=%s, new_api_key=%s)",
