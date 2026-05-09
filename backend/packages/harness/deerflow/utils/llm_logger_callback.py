@@ -23,6 +23,7 @@ class LLMLoggerCallback(BaseCallbackHandler):
         self._accumulated_outputs: dict[UUID | str, list[str]] = {}
         self._model_names: dict[UUID | str, str] = {}
         self._actual_model_names: dict[UUID | str, str] = {}
+        self._input_lens: dict[UUID | str, int] = {}
         # 动态 API Key 管理器（可选），用于 401 invalid_api_key 时强制刷新
         self._apikey_manager = apikey_manager
 
@@ -63,6 +64,7 @@ class LLMLoggerCallback(BaseCallbackHandler):
         
         # 记录输入内容
         input_content = "\n".join(prompts) if prompts else ""
+        self._input_lens[key] = len(input_content)
         thread_id = self._get_thread_id()
         
         logger.info("llm.invoke.start", extra={
@@ -95,6 +97,7 @@ class LLMLoggerCallback(BaseCallbackHandler):
         accumulated = self._accumulated_outputs.pop(run_id, []) if run_id is not None else []
         model_name = self._model_names.pop(run_id, None) if run_id is not None else None
         actual_model = self._actual_model_names.pop(run_id, None) if run_id is not None else None
+        input_len = self._input_lens.pop(run_id, 0) if run_id is not None else 0
 
         # 2. 回退：用 response.llm_output 中的 model_name 匹配
         if start_time is None:
@@ -107,6 +110,7 @@ class LLMLoggerCallback(BaseCallbackHandler):
                 accumulated = self._accumulated_outputs.pop(fallback_name, [])
                 model_name = self._model_names.pop(fallback_name, None)
                 actual_model = self._actual_model_names.pop(fallback_name, None)
+                input_len = self._input_lens.pop(fallback_name, 0)
         
         # 3. 最后回退：使用任意一个剩余条目
         if start_time is None and self._start_times:
@@ -115,6 +119,7 @@ class LLMLoggerCallback(BaseCallbackHandler):
             accumulated = self._accumulated_outputs.pop(key, [])
             model_name = self._model_names.pop(key, None)
             actual_model = self._actual_model_names.pop(key, None)
+            input_len = self._input_lens.pop(key, 0)
         
         duration_ms = (time.time() - start_time) * 1000 if start_time else 0
         token_usage = response.llm_output.get("token_usage", {}) if response.llm_output else {}
@@ -144,6 +149,7 @@ class LLMLoggerCallback(BaseCallbackHandler):
             "completion_tokens": token_usage.get("completion_tokens"),
             "total_tokens": token_usage.get("total_tokens"),
             "output_content": output_content,
+            "input_output_len": input_len + len(output_content),
         })
 
     @override
@@ -163,6 +169,7 @@ class LLMLoggerCallback(BaseCallbackHandler):
             # 同步清理其他缓冲区
             self._accumulated_outputs.pop(key, None)
             self._model_names.pop(key, None)
+            self._input_lens.pop(key, None)
 
         # 3. 计算持续时间
         duration_ms = (time.time() - start_time) * 1000 if start_time else 0
@@ -171,11 +178,13 @@ class LLMLoggerCallback(BaseCallbackHandler):
         if run_id is not None:
             self._accumulated_outputs.pop(run_id, None)
             self._model_names.pop(run_id, None)
+            self._input_lens.pop(run_id, None)
         else:
             # 回退：清理所有缓冲区（无法确定是哪次调用出错）
             self._accumulated_outputs.clear()
             self._model_names.clear()
             self._actual_model_names.clear()
+            self._input_lens.clear()
 
         thread_id = self._get_thread_id()
 
