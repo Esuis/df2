@@ -23,55 +23,86 @@ from deerflow.config.app_config import get_app_config
 from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
 from deerflow.config.paths import get_paths
+from deerflow.community.common.auth_context import get_resolved_auth, set_resolved_auth, ResolvedAuth
 logger = logging.getLogger(__name__)
 
-# def _custom_params_path(thread_id: str):
-#     """Return the path to the per-thread custom_params JSON file."""
-#     return get_paths().thread_dir(thread_id) / "custom_params.json"
+def _custom_params_path(thread_id: str):
+    """Return the path to the per-thread custom_params JSON file."""
+    return get_paths().thread_dir(thread_id) / "custom_params.json"
 
 
-# def _save_custom_params(thread_id: str, params: dict) -> None:
-#     """Persist customParams for *thread_id* to disk."""
-#     try:
-#         path = _custom_params_path(thread_id)
-#         path.parent.mkdir(parents=True, exist_ok=True)
-#         path.write_text(json.dumps(params, ensure_ascii=False), encoding="utf-8")
-#         logger.debug("Saved customParams for thread %s: %s", thread_id, params)
-#     except Exception:
-#         logger.warning("Failed to save customParams for thread %s (non-fatal)", thread_id, exc_info=True)
+def _save_custom_params(thread_id: str, params: dict) -> None:
+    """Persist customParams for *thread_id* to disk."""
+    try:
+        path = _custom_params_path(thread_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(params, ensure_ascii=False), encoding="utf-8")
+        logger.debug("Saved customParams for thread %s: %s", thread_id, params)
+    except Exception:
+        logger.warning("Failed to save customParams for thread %s (non-fatal)", thread_id, exc_info=True)
 
 
-# def _load_custom_params(thread_id: str) -> dict | None:
-#     """Load persisted customParams for *thread_id* from disk."""
-#     try:
-#         path = _custom_params_path(thread_id)
-#         if path.exists():
-#             data = json.loads(path.read_text(encoding="utf-8"))
-#             logger.debug("Loaded customParams for thread %s: %s", thread_id, data)
-#             return data
-#     except Exception:
-#         logger.warning("Failed to load customParams for thread %s (non-fatal)", thread_id, exc_info=True)
-#     return None
+def _load_custom_params(thread_id: str) -> dict | None:
+    """Load persisted customParams for *thread_id* from disk."""
+    try:
+        path = _custom_params_path(thread_id)
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            logger.debug("Loaded customParams for thread %s: %s", thread_id, data)
+            return data
+    except Exception:
+        logger.warning("Failed to load customParams for thread %s (non-fatal)", thread_id, exc_info=True)
+    return None
 
 
-# def _resolve_custom_params(cfg: dict, thread_id: str | None) -> dict | None:
-#     """Resolve customParams: prefer runtime configurable, fall back to persisted file.
-#     When customParams is present in the runtime config (i.e. during a
-#     ``run/stream`` request), it is persisted to disk so that subsequent
-#     state/history reads can recover it.
-#     When customParams is absent (i.e. during a ``state`` or ``history``
-#     read), the persisted file is used as a fallback.
-#     """
-#     custom_params = cfg.get("custom_params")
-#     if custom_params is not None and thread_id:
-#         # Runtime override — persist for future reads
-#         _save_custom_params(thread_id, custom_params)
-#         return custom_params
+def _resolve_custom_params(cfg: dict, thread_id: str | None) -> dict | None:
+    """Resolve customParams: prefer runtime configurable, fall back to persisted file.
+    When customParams is present in the runtime config (i.e. during a
+    ``run/stream`` request), it is persisted to disk so that subsequent
+    state/history reads can recover it.
+    When customParams is absent (i.e. during a ``state`` or ``history``
+    read), the persisted file is used as a fallback.
+    """
+    custom_params = cfg.get("custom_params")
+    if custom_params is not None and thread_id:
+        # Runtime override — persist for future reads
+        _save_custom_params(thread_id, custom_params)
+        return custom_params
 
-#     if not custom_params and thread_id:
-#         # No runtime value — try persisted fallback
-#         custom_params = _load_custom_params(thread_id)
-#     return custom_params
+    if not custom_params and thread_id:
+        # No runtime value — try persisted fallback
+        custom_params = _load_custom_params(thread_id)
+    return custom_params
+
+
+def _resolve_auth_params(custom_params: dict | None) -> None:
+    """从 custom_params 中解析认证方案并设置到 auth context。
+
+    优先级：guwp-token > jrt-auth-code > okic-token > muwp-user > none
+    """
+    if not custom_params:
+        return
+
+    guwp_token = custom_params.get("guwp-token") or ""
+    jrt_auth_code = custom_params.get("jrt-auth-code") or ""
+    okic_token = custom_params.get("okic-token") or ""
+    okic_type = custom_params.get("okic-type") or ""
+    muwp_user = custom_params.get("muwpUser") or {}
+
+    if not isinstance(muwp_user, dict):
+        muwp_user = {}
+
+    if guwp_token:
+        set_resolved_auth(ResolvedAuth(auth_mode="guwp-token", guwp_token=guwp_token))
+    elif jrt_auth_code:
+        set_resolved_auth(ResolvedAuth(auth_mode="jrt-auth-code", jrt_auth_code=jrt_auth_code))
+    elif okic_token:
+        set_resolved_auth(ResolvedAuth(auth_mode="okic-token", okic_token=okic_token, okic_type=okic_type))
+    elif muwp_user:
+        set_resolved_auth(ResolvedAuth(auth_mode="muwp-user", muwp_user=muwp_user))
+    else:
+        set_resolved_auth(ResolvedAuth(auth_mode="none"))
+
 
 def _resolve_model_name(requested_model_name: str | None = None) -> str:
     """Resolve a runtime model name safely, falling back to default if invalid. Returns None if no models are configured."""
@@ -346,10 +377,12 @@ def make_lead_agent(config: RunnableConfig):
     agent_name = cfg.get("agent_name")
     thread_id = cfg.get("thread_id")
 
-    # custom_params = _resolve_custom_params(cfg, thread_id)
+    custom_params = _resolve_custom_params(cfg, thread_id)
+    _resolve_auth_params(custom_params)
+    logger.info("Thread %s 认证方式: %s", thread_id, get_resolved_auth().auth_mode)
     # runtime_model_name: str | None = custom_params.get("llm_model_name")
-    runtime_model_name = None
-    runtime_supports_vision = None
+    runtime_model_name = custom_params.get("llm_model_name", None)
+    runtime_supports_vision = custom_params.get("llm_supports_vision", None)
     # runtime_supports_vision: bool | None = custom_params.get("llm_supports_vision")
     # logger.info(f"[agent3.py]:custom_params:{custom_params}")
     # 新增自定义字段
