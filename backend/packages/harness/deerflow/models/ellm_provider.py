@@ -35,6 +35,7 @@ from typing import Any
 
 from pydantic import Field, SecretStr
 from langchain_core.language_models import LanguageModelInput
+from langchain_core.messages import AIMessageChunk
 from langchain_openai import ChatOpenAI
 
 from deerflow.models.ellm_apikey_manager import EllmApiKeyManager
@@ -71,6 +72,9 @@ class EllmChatModel(ChatOpenAI):
     scene_code: str = ""
     api_key_refresh_interval: int = 1800
     api_key_refresh_ahead: int = 300
+
+    # 是否在流式输出时主动注入 <think> 标签（由 create_chat_model() 设置）
+    inject_think_tag: bool = False
 
     # 必须在父类初始化校验前就存在一个占位 api_key
     openai_api_key: SecretStr = Field(
@@ -148,3 +152,20 @@ class EllmChatModel(ChatOpenAI):
         )
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
         return payload
+
+    async def _astream(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Override _astream to inject <think> tag on first non-empty AI content chunk."""
+        _injected = False
+        async for chunk in super()._astream(*args, **kwargs):
+            if self.inject_think_tag and not _injected:
+                msg = chunk.message
+                if isinstance(msg, AIMessageChunk) \
+                   and isinstance(msg.content, str) and msg.content \
+                   and not msg.content.startswith("<think>"):
+                    msg.content = "<think>\n" + msg.content
+                    _injected = True
+            yield chunk

@@ -31,7 +31,7 @@ def _vllm_disable_chat_template_kwargs(chat_template_kwargs: dict) -> dict:
     return disable_kwargs
 
 
-def create_chat_model(name: str | None = None, thinking_enabled: bool = False, runtime_model_override: str | None = None, **kwargs) -> BaseChatModel:
+def create_chat_model(name: str | None = None, thinking_enabled: bool = False, runtime_model_override: str | None = None, add_think: bool = False, **kwargs) -> BaseChatModel:
     """Create a chat model instance from the config.
 
     Args:
@@ -39,6 +39,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, r
         thinking_enabled: Whether thinking mode is enabled.
         runtime_model_override: If provided and the model is marked as dynamic_model, override
             the ``model`` field in ModelConfig with this value.
+        add_think: If True, enable <think> tag injection on the model instance (for EllmChatModel).
 
     Returns:
         A chat model instance.
@@ -120,6 +121,12 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, r
             model_settings_from_config["reasoning_effort"] = "medium"
 
     model_instance = model_class(**kwargs, **model_settings_from_config)
+
+    # 启用 <think> 标签注入（由前端 add_think 参数控制）
+    if add_think:
+        if hasattr(model_instance, "inject_think_tag"):
+            model_instance.inject_think_tag = True
+            logger.debug("Think tag injection enabled for model '%s' (add_think=True)", name)
 
     # 获取动态 API Key 管理器（EllmChatModel 及其子类在 model_post_init 中设置 _key_manager）
     apikey_manager = getattr(model_instance, '_key_manager', None)

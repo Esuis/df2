@@ -90,6 +90,7 @@ async def task_tool(
     trace_id = None
     runtime_model_override = None
     runtime_supports_vision = None
+    add_think = False
 
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")
@@ -103,6 +104,7 @@ async def task_tool(
         parent_model = metadata.get("model_name")
         runtime_model_override = metadata.get("runtime_model_override")
         runtime_supports_vision = metadata.get("runtime_supports_vision")
+        add_think = metadata.get("add_think", False)
 
         # Get or generate trace_id for distributed tracing
         trace_id = metadata.get("trace_id") or str(uuid.uuid4())[:8]
@@ -124,6 +126,7 @@ async def task_tool(
         thread_id=thread_id,
         trace_id=trace_id,
         runtime_model_override=runtime_model_override,
+        add_think=add_think,
     )
 
     # Start background execution (always async to prevent blocking)

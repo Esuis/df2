@@ -135,6 +135,7 @@ class SubagentExecutor:
         thread_id: str | None = None,
         trace_id: str | None = None,
         runtime_model_override: str | None = None,
+        add_think: bool = False,
     ):
         """Initialize the executor.
 
@@ -148,10 +149,12 @@ class SubagentExecutor:
             trace_id: Trace ID from parent for distributed tracing.
             runtime_model_override: If the parent uses a dynamic model, pass through
                 the actual model ID so the subagent also uses it.
+            add_think: Whether to enable <think> tag injection for DeepSeek models.
         """
         self.config = config
         self.parent_model = parent_model
         self.runtime_model_override = runtime_model_override
+        self.add_think = add_think
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
         self.thread_id = thread_id
@@ -170,7 +173,7 @@ class SubagentExecutor:
     def _create_agent(self):
         """Create the agent instance."""
         model_name = _get_model_name(self.config, self.parent_model)
-        model = create_chat_model(name=model_name, thinking_enabled=False, runtime_model_override=self.runtime_model_override)
+        model = create_chat_model(name=model_name, thinking_enabled=False, runtime_model_override=self.runtime_model_override, add_think=self.add_think)
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
