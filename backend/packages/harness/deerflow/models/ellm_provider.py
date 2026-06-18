@@ -123,13 +123,15 @@ class EllmChatModel(ChatOpenAI):
         super().model_post_init(__context)
 
     def _inject_latest_api_key(self) -> None:
-        """Update default_headers with the latest API key from the manager."""
+        """Update default_headers with the latest API key from the manager.
+
+        Mutates the dict in-place so that the reference held by the
+        underlying ``openai.OpenAI`` client (captured at model init)
+        always sees the updated key.
+        """
         try:
             current_key = self._key_manager.get_api_key()
-            self.default_headers = {
-                **(self.default_headers or {}),
-                "api-key": current_key,
-            }
+            self.default_headers["api-key"] = current_key
         except Exception as e:
             logger.warning(
                 "EllmChatModel: failed to refresh api-key header, "

@@ -98,6 +98,7 @@ class EllmApiKeyManager:
         self._key_expiry_time: float = 0.0  # Absolute Unix timestamp (seconds) when key expires
         self._lock = threading.RLock()
         self._last_force_refresh_at: float = 0.0
+        self._last_cache_mtime: float = 0.0  # mtime of cache file when last loaded
         self._refresh_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._reset_event = threading.Event()
@@ -201,9 +202,11 @@ class EllmApiKeyManager:
     def get_api_key(self) -> str:
         """Get the current valid API key.
 
-        If the key is near expiry (within ``refresh_ahead`` seconds), a
-        synchronous refresh is attempted before returning. If no key is
-        available at all, a synchronous refresh is forced.
+        Always checks the shared cache file (via mtime) before falling back
+        to the in-memory key, so that a ``force_refresh_key`` in another
+        process is visible on the next model call.  If no fresh key is
+        found in the cache and the in-memory key is near expiry, a
+        synchronous refresh is attempted.
 
         Returns:
             The current valid API key string.
@@ -212,6 +215,11 @@ class EllmApiKeyManager:
             RuntimeError: If no key is available and refresh fails.
         """
         with self._lock:
+            # Check shared cache first (mtime-based, ~1μs stat call)
+            cached = self._load_from_cache()
+            if cached is not None:
+                return cached
+
             if self._current_key and not self._is_near_expiry():
                 return self._current_key
 
@@ -482,17 +490,28 @@ class EllmApiKeyManager:
         """How many seconds a cache entry is considered fresh."""
         return max(self._refresh_interval - self._refresh_ahead, 60)
 
-    def _read_cache(self) -> dict[str, Any] | None:
-        """Read the shared cache file; return None if missing or invalid."""
+    def _read_cache(self, force: bool = False) -> dict[str, Any] | None:
+        """Read the shared cache file; return None if missing, invalid, or unchanged.
+
+        Uses mtime comparison instead of time-based staleness so that a
+        force_refresh in another process is visible immediately.
+
+        When ``force=True``, the mtime check is skipped — the file is always
+        read.  This is used in :meth:`_acquire_lock_and_refresh` so that a
+        thread that waited for the file lock reads the latest cache content
+        even when the mtime matches its ``_last_cache_mtime``.
+        """
         try:
             path = self._cache_path()
             if not path.exists():
                 return None
+            if not force:
+                st = os.stat(path)
+                if st.st_mtime == self._last_cache_mtime:
+                    # mtime unchanged — same version we already loaded
+                    return None
             data = json.loads(path.read_text(encoding="utf-8"))
-            obtained_at = data.get("obtained_at", 0)
-            if time.time() - obtained_at < self._cache_validity_seconds():
-                return data
-            return None  # stale
+            return data
         except Exception:
             return None
 
@@ -517,12 +536,17 @@ class EllmApiKeyManager:
                 e,
             )
 
-    def _load_from_cache(self) -> str | None:
+    def _load_from_cache(self, force: bool = False) -> str | None:
         """Try to load a fresh key from the shared cache into memory.
+
+        Args:
+            force: If True, skip the mtime check and always read the file.
+                   Used by :meth:`_acquire_lock_and_refresh` to ensure the
+                   latest content is visible after waiting for the file lock.
 
         Returns the key string if a fresh cache was loaded, None otherwise.
         """
-        cached = self._read_cache()
+        cached = self._read_cache(force=force)
         if cached is None:
             return None
 
@@ -533,6 +557,12 @@ class EllmApiKeyManager:
         obtained_at = cached.get("obtained_at", 0)
         ttl_ms = cached.get("ttl_ms", 0)
         expiry_time = cached.get("expiry_time", 0.0)
+
+        # Record mtime before loading so subsequent calls see up-to-date value
+        try:
+            self._last_cache_mtime = os.stat(self._cache_path()).st_mtime
+        except Exception:
+            pass
 
         with self._lock:
             self._current_key = api_key
@@ -571,14 +601,18 @@ class EllmApiKeyManager:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
-            # Double-check: another process may have refreshed while we waited
-            cached = self._read_cache()
-            if cached is not None:
-                api_key = cached.get("api_key", "")
-                if api_key:
-                    # Load the fresh cache into memory
-                    result = self._load_from_cache()
-                    if result:
+            # Double-check: another process may have refreshed while we waited.
+            # force=True skips the mtime comparison so we always see the
+            # latest cache content, even if _last_cache_mtime was already
+            # updated by another thread in the same process.
+            result = self._load_from_cache(force=True)
+            if result is not None:
+                # Check freshness — if the cached key is still good, use it.
+                # This protects against the (theoretical) case where the
+                # cache was never refreshed and force read returned the old
+                # expired key: we'd fall through to HTTP rather than return it.
+                with self._lock:
+                    if not self._is_near_expiry():
                         logger.info(
                             "ELLM ApiKeyManager: another process refreshed while we waited "
                             "(pid=%s, scene_code=%s)",
@@ -586,6 +620,7 @@ class EllmApiKeyManager:
                             self._scene_code,
                         )
                         return result
+                # Key in cache is also near expiry — fall through to HTTP
 
             # We are the chosen process — do the HTTP refresh
             api_key = self._fetch_key_from_server()
