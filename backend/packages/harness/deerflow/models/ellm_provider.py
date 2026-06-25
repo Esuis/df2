@@ -31,7 +31,6 @@ Configuration example (``config.yaml``)::
 from __future__ import annotations
 
 import logging
-import random
 from typing import Any
 
 from pydantic import Field, SecretStr
@@ -129,15 +128,9 @@ class EllmChatModel(ChatOpenAI):
         Mutates the dict in-place so that the reference held by the
         underlying ``openai.OpenAI`` client (captured at model init)
         always sees the updated key.
-
-        测试模式：5% 概率模拟偶发 401，触发 force_refresh_key()。
         """
         try:
-            # 5% 概率模拟偶发 key 失效 → 强制刷新
-            if random.random() < 0.03:
-                current_key = self._key_manager.force_refresh_key()
-            else:
-                current_key = self._key_manager.get_api_key()
+            current_key = self._key_manager.get_api_key()
             self.default_headers["api-key"] = current_key
         except Exception as e:
             logger.warning(

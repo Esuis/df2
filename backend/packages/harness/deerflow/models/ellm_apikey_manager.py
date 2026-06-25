@@ -76,8 +76,6 @@ class EllmApiKeyManager:
     # Class-level registry: scene_code -> EllmApiKeyManager
     _instances: dict[str, EllmApiKeyManager] = {}
     _class_lock = threading.Lock()
-    # 测试用假 key 自增序号
-    _fake_key_seq: int = 0
 
     def __init__(
         self,
@@ -327,45 +325,45 @@ class EllmApiKeyManager:
         return api_key
 
     def _fetch_key_from_server(self) -> str:
-        """Generate a fake API key for concurrency testing.
+        """Pure HTTP fetch — call the ELLM gateway and parse the response.
 
-        The fake key encodes its own generation time and expiry time as
-        human-readable Beijing-time strings and Unix timestamps, so that
-        log analysis can later detect stale-key usage.
+        Returns:
+            The newly obtained API key string.
 
-        The response dict mirrors the real ELLM gateway response format so
-        that ``_parse_key_response`` handles it identically — the cache files
-        written by ``_write_cache`` have the same structure as in production.
+        Raises:
+            Exception: If the HTTP request fails or the response is invalid.
         """
-        now = time.time()
-        ttl_seconds = self._refresh_interval  # default 1800s (30 minutes)
-        expiry = now + ttl_seconds
-
-        type(self)._fake_key_seq += 1
-
-        gen_iso = datetime.fromtimestamp(now, tz=_BJ_TZ).strftime("%Y%m%d-%H%M%S")
-        exp_iso = datetime.fromtimestamp(expiry, tz=_BJ_TZ).strftime("%Y%m%d-%H%M%S")
-
-        api_key = (
-            f"__TEST__"
-            f"gen_iso={gen_iso}|exp_iso={exp_iso}|"
-            f"gen_ts={now}|exp_ts={expiry}|"
-            f"seq={type(self)._fake_key_seq}|"
-            f"pid={os.getpid()}|"
-            f"scene={self._scene_code}"
+        req_message = json.dumps(
+            {
+                "REQ_HEAD": {"TRAN_PROCESS": "", "TRAN_ID": ""},
+                "REQ_BODY": {"param": {"sceneCode": self._scene_code}},
+            },
+            ensure_ascii=False,
         )
 
-        fake_response = {
-            "RSP_HEAD": {"TRAN_SUCCESS": "1"},
-            "RSP_BODY": {
-                "result": {
-                    "apiKey": api_key,
-                    "timeToLive": int(expiry * 1000),
-                }
-            },
-        }
+        logger.debug(
+            "ELLM ApiKeyManager: requesting new key (scene_code=%s)",
+            self._scene_code,
+        )
 
-        return self._parse_key_response(fake_response)
+        client = self._get_http_client()
+        try:
+            response = client.post(
+                self._api_key_url,
+                data={"REQ_MESSAGE": req_message},
+                timeout=self._request_timeout,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as e:
+            logger.error(
+                "ELLM ApiKeyManager: HTTP request failed (scene_code=%s, url=%s, error=%s)",
+                self._scene_code,
+                self._api_key_url,
+                e,
+            )
+            raise
+
+        return self._parse_key_response(response.json())
 
     def _parse_key_response(self, data: dict[str, Any]) -> str:
         """Parse the ELLM API key response and update internal state.
