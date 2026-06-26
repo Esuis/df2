@@ -57,3 +57,10 @@ config.yaml.bak
 .playwright-mcp
 .gstack/
 .worktrees
+*.tar
+
+openspec/
+.qoder/
+
+docker/
+docs/

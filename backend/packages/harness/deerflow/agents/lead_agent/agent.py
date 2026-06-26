@@ -26,53 +26,53 @@ from deerflow.config.paths import get_paths
 from deerflow.community.common.auth_context import get_resolved_auth, set_resolved_auth, ResolvedAuth
 logger = logging.getLogger(__name__)
 
-def _custom_params_path(thread_id: str):
-    """Return the path to the per-thread custom_params JSON file."""
-    return get_paths().thread_dir(thread_id) / "custom_params.json"
+# def _custom_params_path(thread_id: str):
+#     """Return the path to the per-thread custom_params JSON file."""
+#     return get_paths().thread_dir(thread_id) / "custom_params.json"
 
 
-def _save_custom_params(thread_id: str, params: dict) -> None:
-    """Persist customParams for *thread_id* to disk."""
-    try:
-        path = _custom_params_path(thread_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(params, ensure_ascii=False), encoding="utf-8")
-        logger.debug("Saved customParams for thread %s: %s", thread_id, params)
-    except Exception:
-        logger.warning("Failed to save customParams for thread %s (non-fatal)", thread_id, exc_info=True)
+# def _save_custom_params(thread_id: str, params: dict) -> None:
+#     """Persist customParams for *thread_id* to disk."""
+#     try:
+#         path = _custom_params_path(thread_id)
+#         path.parent.mkdir(parents=True, exist_ok=True)
+#         path.write_text(json.dumps(params, ensure_ascii=False), encoding="utf-8")
+#         logger.debug("Saved customParams for thread %s: %s", thread_id, params)
+#     except Exception:
+#         logger.warning("Failed to save customParams for thread %s (non-fatal)", thread_id, exc_info=True)
 
 
-def _load_custom_params(thread_id: str) -> dict | None:
-    """Load persisted customParams for *thread_id* from disk."""
-    try:
-        path = _custom_params_path(thread_id)
-        if path.exists():
-            data = json.loads(path.read_text(encoding="utf-8"))
-            logger.debug("Loaded customParams for thread %s: %s", thread_id, data)
-            return data
-    except Exception:
-        logger.warning("Failed to load customParams for thread %s (non-fatal)", thread_id, exc_info=True)
-    return None
+# def _load_custom_params(thread_id: str) -> dict | None:
+#     """Load persisted customParams for *thread_id* from disk."""
+#     try:
+#         path = _custom_params_path(thread_id)
+#         if path.exists():
+#             data = json.loads(path.read_text(encoding="utf-8"))
+#             logger.debug("Loaded customParams for thread %s: %s", thread_id, data)
+#             return data
+#     except Exception:
+#         logger.warning("Failed to load customParams for thread %s (non-fatal)", thread_id, exc_info=True)
+#     return None
 
 
-def _resolve_custom_params(cfg: dict, thread_id: str | None) -> dict | None:
-    """Resolve customParams: prefer runtime configurable, fall back to persisted file.
-    When customParams is present in the runtime config (i.e. during a
-    ``run/stream`` request), it is persisted to disk so that subsequent
-    state/history reads can recover it.
-    When customParams is absent (i.e. during a ``state`` or ``history``
-    read), the persisted file is used as a fallback.
-    """
-    custom_params = cfg.get("custom_params")
-    if custom_params is not None and thread_id:
-        # Runtime override — persist for future reads
-        _save_custom_params(thread_id, custom_params)
-        return custom_params
+# def _resolve_custom_params(cfg: dict, thread_id: str | None) -> dict | None:
+#     """Resolve customParams: prefer runtime configurable, fall back to persisted file.
+#     When customParams is present in the runtime config (i.e. during a
+#     ``run/stream`` request), it is persisted to disk so that subsequent
+#     state/history reads can recover it.
+#     When customParams is absent (i.e. during a ``state`` or ``history``
+#     read), the persisted file is used as a fallback.
+#     """
+#     custom_params = cfg.get("custom_params")
+#     if custom_params is not None and thread_id:
+#         # Runtime override — persist for future reads
+#         _save_custom_params(thread_id, custom_params)
+#         return custom_params
 
-    if not custom_params and thread_id:
-        # No runtime value — try persisted fallback
-        custom_params = _load_custom_params(thread_id)
-    return custom_params
+#     if not custom_params and thread_id:
+#         # No runtime value — try persisted fallback
+#         custom_params = _load_custom_params(thread_id)
+#     return custom_params
 
 
 def _resolve_auth_params(custom_params: dict | None) -> None:
@@ -367,7 +367,8 @@ def make_lead_agent(config: RunnableConfig):
     thinking_enabled = cfg.get("thinking_enabled", True)
     reasoning_effort = cfg.get("reasoning_effort", None)
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
-    # custom_params: dict = cfg.get("custom_params", {})
+    custom_params: dict = cfg.get("custom_params", {}) or {}
+    add_think: bool = custom_params.get("add_think", False)
     # runtime_model_name: str | None = custom_params.get("llm_model_name")
     # runtime_supports_vision: bool | None = custom_params.get("llm_supports_vision")
     is_plan_mode = cfg.get("is_plan_mode", False)
@@ -377,12 +378,12 @@ def make_lead_agent(config: RunnableConfig):
     agent_name = cfg.get("agent_name")
     thread_id = cfg.get("thread_id")
 
-    custom_params = _resolve_custom_params(cfg, thread_id)
-    _resolve_auth_params(custom_params)
-    logger.info("Thread %s 认证方式: %s", thread_id, get_resolved_auth().auth_mode)
+    # custom_params = _resolve_custom_params(cfg, thread_id)
+    # _resolve_auth_params(custom_params)
+    # logger.info("Thread %s 认证方式: %s", thread_id, get_resolved_auth().auth_mode)
     # runtime_model_name: str | None = custom_params.get("llm_model_name")
-    runtime_model_name = custom_params.get("llm_model_name", None)
-    runtime_supports_vision = custom_params.get("llm_supports_vision", None)
+    # runtime_model_name = custom_params.get("llm_model_name", None)
+    # runtime_supports_vision = custom_params.get("llm_supports_vision", None)
     # runtime_supports_vision: bool | None = custom_params.get("llm_supports_vision")
     # logger.info(f"[agent3.py]:custom_params:{custom_params}")
     # 新增自定义字段
@@ -409,11 +410,11 @@ def make_lead_agent(config: RunnableConfig):
     runtime_model_override: str | None = None
     effective_supports_vision: bool = model_config.supports_vision
 
-    # if model_config.dynamic_model and runtime_model_name:
-    #     # Dynamic model: override the config placeholder with the actual model ID from custom_params
-    #     runtime_model_override = runtime_model_name
-    #     if runtime_supports_vision is not None:
-    #         effective_supports_vision = runtime_supports_vision
+    if model_config.dynamic_model and runtime_model_name:
+        # Dynamic model: override the config placeholder with the actual model ID from custom_params
+        runtime_model_override = runtime_model_name
+        if runtime_supports_vision is not None:
+            effective_supports_vision = runtime_supports_vision
 
     if thinking_enabled and not model_config.supports_thinking:
         logger.warning(f"Thinking mode is enabled but model '{model_name}' does not support it; fallback to non-thinking mode.")
@@ -444,13 +445,14 @@ def make_lead_agent(config: RunnableConfig):
             "subagent_enabled": subagent_enabled,
             "runtime_model_override": runtime_model_override,
             "runtime_supports_vision": effective_supports_vision,
+            "add_think": add_think,
         }
     )
 
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
         return create_agent(
-            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, runtime_model_override=runtime_model_override),
+            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, runtime_model_override=runtime_model_override, add_think=add_think),
             tools=get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, runtime_supports_vision=effective_supports_vision) + [setup_agent],
             middleware=_build_middlewares(config, model_name=model_name, runtime_supports_vision=effective_supports_vision),
             system_prompt=apply_prompt_template(subagent_enabled=subagent_enabled, max_concurrent_subagents=max_concurrent_subagents, available_skills=set(["bootstrap"])),
@@ -459,7 +461,7 @@ def make_lead_agent(config: RunnableConfig):
 
     # Default lead agent (unchanged behavior)
     return create_agent(
-        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, runtime_model_override=runtime_model_override),
+        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, runtime_model_override=runtime_model_override, add_think=add_think),
         tools=get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, runtime_supports_vision=effective_supports_vision),
         middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, runtime_supports_vision=effective_supports_vision),
         system_prompt=apply_prompt_template(

@@ -67,6 +67,23 @@ models:
   #       thinking:
   #         type: enabled
 
+  # Example: Dynamic model entry — the 'model' field is a placeholder that will be
+  # overridden at runtime by the actual model name passed from the frontend.
+  # This is useful when multiple models share the same base_url/api_key.
+  # - name: dynamic-model
+  #   display_name: Dynamic Model
+  #   use: langchain_openai:ChatOpenAI
+  #   model: placeholder
+  #   dynamic_model: true
+  #   base_url: https://your-gateway.example.com/v1
+  #   api_key: $YOUR_API_KEY
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 4096
+  #   temperature: 0.7
+  #   supports_thinking: true
+  #   supports_vision: true
+
   # Example: OpenAI model
   # - name: gpt-4
   #   display_name: GPT-4
@@ -352,6 +369,13 @@ tools:
   #   image_search_time_range: 10
   #   # Image size filter. Options: "l" (large), "m" (medium), "i" (icon).
   #   image_size: "i"
+
+  # 通讯录查询工具（员工通讯录查询）
+  # - name: 通讯录查询
+  #   group: web
+  #   use: deerflow.community.contact_search.tools:contact_search_tool
+  #   # api_url: https://guwp.bocomm.com/GUWP.GUWP-USERCENTER.V-1.0/api/1.0/userCenter/es/contactSearchTool
+  #   # timeout: 30
 
   # File operations tools
   - name: ls
