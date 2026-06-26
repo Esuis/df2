@@ -1,47 +1,44 @@
-"use client";
+import { redirect } from "next/navigation";
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useCallback, useEffect, useLayoutEffect, useState } from "react";
-import { Toaster } from "sonner";
+import { GatewayOfflineFallback } from "@/components/workspace/gateway-offline-fallback";
+import { AuthProvider } from "@/core/auth/AuthProvider";
+import { getServerSideUser } from "@/core/auth/server";
+import { assertNever } from "@/core/auth/types";
 
-import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
-import { CommandPalette } from "@/components/workspace/command-palette";
-import { WorkspaceSidebar } from "@/components/workspace/workspace-sidebar";
-import { getLocalSettings, useLocalSettings } from "@/core/settings";
+import { WorkspaceContent } from "./workspace-content";
 
-const queryClient = new QueryClient();
+export const dynamic = "force-dynamic";
 
-export default function WorkspaceLayout({
+export default async function WorkspaceLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  const [settings, setSettings] = useLocalSettings();
-  const [open, setOpen] = useState(false); // SSR default: open (matches server render)
-  useLayoutEffect(() => {
-    // Runs synchronously before first paint on the client — no visual flash
-    setOpen(!getLocalSettings().layout.sidebar_collapsed);
-  }, []);
-  useEffect(() => {
-    setOpen(!settings.layout.sidebar_collapsed);
-  }, [settings.layout.sidebar_collapsed]);
-  const handleOpenChange = useCallback(
-    (open: boolean) => {
-      setOpen(open);
-      setSettings("layout", { sidebar_collapsed: !open });
-    },
-    [setSettings],
-  );
-  return (
-    <QueryClientProvider client={queryClient}>
-      <SidebarProvider
-        className="h-screen"
-        open={open}
-        onOpenChange={handleOpenChange}
-      >
-        <WorkspaceSidebar />
-        <SidebarInset className="min-w-0">{children}</SidebarInset>
-      </SidebarProvider>
-      <CommandPalette />
-      <Toaster position="top-center" />
-    </QueryClientProvider>
-  );
+  const result = await getServerSideUser();
+
+  switch (result.tag) {
+    case "authenticated":
+      return (
+        <AuthProvider initialUser={result.user}>
+          <WorkspaceContent>{children}</WorkspaceContent>
+        </AuthProvider>
+      );
+    case "needs_setup":
+      redirect("/setup");
+    case "system_setup_required":
+      redirect("/setup");
+    case "unauthenticated":
+      redirect("/login");
+    case "gateway_unavailable":
+      // GatewayOfflineFallback supplies the AuthProvider; WorkspaceContent
+      // already mounts the banner inside its sidebar layout, so renderBanner
+      // stays false here to avoid double-mounting.
+      return (
+        <GatewayOfflineFallback>
+          <WorkspaceContent gatewayUnavailable>{children}</WorkspaceContent>
+        </GatewayOfflineFallback>
+      );
+    case "config_error":
+      throw new Error(result.message);
+    default:
+      assertNever(result);
+  }
 }

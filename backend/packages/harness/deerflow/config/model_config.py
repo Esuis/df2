@@ -27,8 +27,22 @@ class ModelConfig(BaseModel):
         default_factory=lambda: None,
         description="Extra settings to be passed to the model when thinking is enabled",
     )
+    when_thinking_disabled: dict | None = Field(
+        default_factory=lambda: None,
+        description="Extra settings to be passed to the model when thinking is disabled",
+    )
     supports_vision: bool = Field(default_factory=lambda: False, description="Whether the model supports vision/image inputs")
     dynamic_model: bool = Field(default=False, description="If true, the 'model' field is a placeholder and will be overridden at runtime from the request")
+    stream_chunk_timeout: float | None = Field(
+        default=None,
+        description=(
+            "Maximum seconds to wait between successive streaming chunks before "
+            "langchain-openai raises StreamChunkTimeoutError. None means use the "
+            "factory default (240s for OpenAI-compatible clients). Tune higher for "
+            "reasoning models with long thinking pauses; lower for latency-sensitive "
+            "interactive endpoints. Has no effect on non-OpenAI-compatible providers."
+        ),
+    )
     thinking: dict | None = Field(
         default_factory=lambda: None,
         description=(

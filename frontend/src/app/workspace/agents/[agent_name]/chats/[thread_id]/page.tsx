@@ -2,10 +2,11 @@
 
 import { BotIcon, PlusSquare } from "lucide-react";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
+import { SidebarTrigger } from "@/components/ui/sidebar";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ChatBox, useThreadChat } from "@/components/workspace/chats";
@@ -14,7 +15,6 @@ import { InputBox } from "@/components/workspace/input-box";
 import {
   MessageList,
   MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
-  MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM,
 } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
@@ -23,16 +23,21 @@ import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicato
 import { Tooltip } from "@/components/workspace/tooltip";
 import { useAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
+import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
-import { useThreadSettings } from "@/core/settings";
-import { useThreadStream } from "@/core/threads/hooks";
+import { useLocalSettings, useThreadSettings } from "@/core/settings";
+import {
+  useThreadMetadata,
+  useThreadStream,
+  useThreadTokenUsage,
+} from "@/core/threads/hooks";
+import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 export default function AgentChatPage() {
   const { t } = useI18n();
-  const [showFollowups, setShowFollowups] = useState(false);
   const router = useRouter();
 
   const { agent_name } = useParams<{
@@ -41,21 +46,56 @@ export default function AgentChatPage() {
 
   const { agent } = useAgent(agent_name);
 
-  const { threadId, isNewThread, setIsNewThread } = useThreadChat();
+  const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
+    useThreadChat();
+  // `isNewThread` gates history/token-usage fetches until the backend creates
+  // the thread. `isWelcomeMode` controls only the centered welcome layout, so
+  // it can flip immediately on submit without triggering eager history loads.
+  const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
   const [settings, setSettings] = useThreadSettings(threadId);
+  const [localSettings, setLocalSettings] = useLocalSettings();
+  const { tokenUsageEnabled } = useModels();
+  const threadTokenUsage = useThreadTokenUsage(
+    isNewThread || isMock ? undefined : threadId,
+    { enabled: tokenUsageEnabled && !isMock },
+  );
+  const threadMetadata = useThreadMetadata(threadId, {
+    enabled: !isNewThread && !isMock,
+    isMock,
+  });
+  const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
 
   const { showNotification } = useNotification();
-  const [thread, sendMessage] = useThreadStream({
+
+  useEffect(() => {
+    setIsWelcomeMode(isNewThread);
+  }, [isNewThread]);
+
+  const {
+    thread,
+    pendingUsageMessages,
+    sendMessage,
+    isUploading,
+    isHistoryLoading,
+    hasMoreHistory,
+    loadMoreHistory,
+  } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
+    displayThreadId: threadId,
     context: { ...settings.context, agent_name: agent_name },
-    onStart: () => {
-      setIsNewThread(false);
+    isMock,
+    onSend: () => {
+      setIsWelcomeMode(false);
+    },
+    onStart: (createdThreadId) => {
       // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
       history.replaceState(
         null,
         "",
-        `/workspace/agents/${agent_name}/chats/${threadId}`,
+        `/workspace/agents/${agent_name}/chats/${createdThreadId}`,
       );
+      setThreadId(createdThreadId);
+      setIsNewThread(false);
     },
     onFinish: (state) => {
       if (document.hidden || !document.hasFocus()) {
@@ -75,9 +115,41 @@ export default function AgentChatPage() {
     },
   });
 
+  const hasThreadMessages = thread.messages.length > 0;
+
+  useEffect(() => {
+    if (
+      !isNewThread &&
+      !isMock &&
+      threadMetadata.data === null &&
+      !threadMetadata.isLoading &&
+      !threadMetadata.isFetching &&
+      !isHistoryLoading &&
+      !hasMoreHistory &&
+      !hasThreadMessages
+    ) {
+      router.replace(`/workspace/agents/${agent_name}/chats/new`);
+    }
+  }, [
+    agent_name,
+    hasMoreHistory,
+    hasThreadMessages,
+    isHistoryLoading,
+    isMock,
+    isNewThread,
+    router,
+    threadMetadata.data,
+    threadMetadata.isFetching,
+    threadMetadata.isLoading,
+  ]);
+
   const handleSubmit = useCallback(
     (message: PromptInputMessage) => {
-      void sendMessage(threadId, message, { agent_name });
+      const sendPromise = sendMessage(threadId, message, { agent_name });
+      if (message.files.length > 0) {
+        return sendPromise;
+      }
+      void sendPromise;
     },
     [sendMessage, threadId, agent_name],
   );
@@ -86,10 +158,10 @@ export default function AgentChatPage() {
     await thread.stop();
   }, [thread]);
 
-  const messageListPaddingBottom = showFollowups
-    ? MESSAGE_LIST_DEFAULT_PADDING_BOTTOM +
-      MESSAGE_LIST_FOLLOWUPS_EXTRA_PADDING_BOTTOM
-    : undefined;
+  const tokenUsageInlineMode = tokenUsageEnabled
+    ? localSettings.tokenUsage.inlineMode
+    : "off";
+  const hasTodos = (thread.values.todos?.length ?? 0) > 0;
 
   return (
     <ThreadContext.Provider value={{ thread }}>
@@ -97,78 +169,114 @@ export default function AgentChatPage() {
         <div className="relative flex size-full min-h-0 justify-between">
           <header
             className={cn(
-              "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 px-4",
-              isNewThread
+              "absolute top-0 right-0 left-0 z-30 flex h-12 shrink-0 items-center gap-2 px-2 sm:px-4",
+              isWelcomeMode
                 ? "bg-background/0 backdrop-blur-none"
                 : "bg-background/80 shadow-xs backdrop-blur",
             )}
           >
+            <SidebarTrigger className="md:hidden" />
             {/* Agent badge */}
-            <div className="flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1">
+            <div className="flex min-w-0 shrink-0 items-center gap-1.5 rounded-md border px-2 py-1">
               <BotIcon className="text-primary h-3.5 w-3.5" />
-              <span className="text-xs font-medium">
+              <span className="hidden max-w-24 truncate text-xs font-medium sm:inline sm:max-w-none">
                 {agent?.name ?? agent_name}
               </span>
             </div>
 
-            <div className="flex w-full items-center text-sm font-medium">
+            <div className="flex min-w-0 flex-1 items-center text-sm font-medium">
               <ThreadTitle threadId={threadId} thread={thread} />
             </div>
-            <div className="mr-4 flex items-center">
+            <div className="flex shrink-0 items-center sm:mr-4">
               <Tooltip content={t.agents.newChat}>
                 <Button
+                  className="px-2 sm:px-3"
                   size="sm"
                   variant="secondary"
                   onClick={() => {
                     router.push(`/workspace/agents/${agent_name}/chats/new`);
                   }}
                 >
-                  <PlusSquare /> {t.agents.newChat}
+                  <PlusSquare />
+                  <span className="hidden sm:inline">{t.agents.newChat}</span>
                 </Button>
               </Tooltip>
-              <TokenUsageIndicator messages={thread.messages} />
+              <TokenUsageIndicator
+                threadId={isNewThread ? undefined : threadId}
+                backendUsage={backendTokenUsage}
+                enabled={tokenUsageEnabled}
+                messages={thread.messages}
+                pendingMessages={pendingUsageMessages}
+                preferences={localSettings.tokenUsage}
+                onPreferencesChange={(preferences) =>
+                  setLocalSettings("tokenUsage", preferences)
+                }
+              />
               <ExportTrigger threadId={threadId} />
               <ArtifactTrigger />
             </div>
           </header>
 
           <main className="flex min-h-0 max-w-full grow flex-col">
-            <div className="flex size-full justify-center">
+            <div className="flex min-h-0 flex-1 justify-center">
               <MessageList
-                className={cn("size-full", !isNewThread && "pt-10")}
+                className={cn("size-full", !isWelcomeMode && "pt-10")}
                 threadId={threadId}
                 thread={thread}
-                paddingBottom={messageListPaddingBottom}
+                paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
+                hasMoreHistory={hasMoreHistory}
+                loadMoreHistory={loadMoreHistory}
+                isHistoryLoading={isHistoryLoading}
+                tokenUsageInlineMode={tokenUsageInlineMode}
               />
             </div>
 
-            <div className="absolute right-0 bottom-0 left-0 z-30 flex justify-center px-4">
+            <div
+              className={cn(
+                "right-0 bottom-0 left-0 z-30 flex justify-center px-3 sm:px-4",
+                isWelcomeMode ? "absolute" : "relative shrink-0 pb-4",
+              )}
+            >
               <div
                 className={cn(
                   "relative w-full",
-                  isNewThread && "-translate-y-[calc(50vh-96px)]",
-                  isNewThread
+                  isWelcomeMode &&
+                    "-translate-y-[calc(50vh-48px)] sm:-translate-y-[calc(50vh-96px)]",
+                  isWelcomeMode
                     ? "max-w-(--container-width-sm)"
                     : "max-w-(--container-width-md)",
                 )}
               >
-                <div className="absolute -top-4 right-0 left-0 z-0">
-                  <div className="absolute right-0 bottom-0 left-0">
-                    <TodoList
-                      className="bg-background/5"
-                      todos={thread.values.todos ?? []}
-                      hidden={
-                        !thread.values.todos || thread.values.todos.length === 0
-                      }
-                    />
+                {hasTodos && (
+                  <div
+                    className={cn(
+                      "right-0 left-0 z-0",
+                      isWelcomeMode ? "absolute -top-4" : "relative",
+                    )}
+                  >
+                    <div
+                      className={cn(
+                        "right-0 bottom-0 left-0",
+                        isWelcomeMode ? "absolute" : "relative",
+                      )}
+                    >
+                      <TodoList
+                        className="bg-background/5"
+                        todos={thread.values.todos ?? []}
+                        hidden={false}
+                      />
+                    </div>
                   </div>
-                </div>
+                )}
 
                 <InputBox
-                  className={cn("bg-background/5 w-full -translate-y-4")}
-                  isNewThread={isNewThread}
+                  className={cn(
+                    "bg-background/5 w-full",
+                    isWelcomeMode && "-translate-y-2 sm:-translate-y-4",
+                  )}
+                  isWelcomeMode={isWelcomeMode}
                   threadId={threadId}
-                  autoFocus={isNewThread}
+                  autoFocus={isWelcomeMode}
                   status={
                     thread.error
                       ? "error"
@@ -178,13 +286,15 @@ export default function AgentChatPage() {
                   }
                   context={settings.context}
                   extraHeader={
-                    isNewThread && (
+                    isWelcomeMode && (
                       <AgentWelcome agent={agent} agentName={agent_name} />
                     )
                   }
-                  disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
+                  disabled={
+                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
+                    isUploading
+                  }
                   onContextChange={(context) => setSettings("context", context)}
-                  onFollowupsVisibilityChange={setShowFollowups}
                   onSubmit={handleSubmit}
                   onStop={handleStop}
                 />

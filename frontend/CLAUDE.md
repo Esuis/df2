@@ -17,10 +17,14 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 | `pnpm check`     | Lint + type check (run before committing)         |
 | `pnpm lint`      | ESLint only                                       |
 | `pnpm lint:fix`  | ESLint with auto-fix                              |
+| `pnpm test`      | Run unit tests with Vitest                        |
+| `pnpm test:e2e`  | Run E2E tests with Playwright (Chromium)          |
 | `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)            |
 | `pnpm start`     | Start production server                           |
 
-No test framework is configured.
+Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Vitest; import source modules via the `@/` path alias.
+
+E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`.
 
 ## Architecture
 
@@ -44,6 +48,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   - `threads/` — Thread creation, streaming, state management (hooks + types)
   - `api/` — LangGraph client singleton
   - `artifacts/` — Artifact loading and caching
+  - `channels/` — IM channel connections (provider catalog, connect/runtime-config API + hooks)
   - `i18n/` — Internationalization (en-US, zh-CN)
   - `settings/` — User preferences in localStorage
   - `memory/` — Persistent user memory system
@@ -84,7 +89,11 @@ Backend API URLs are optional; an nginx proxy is used by default:
 
 ```
 NEXT_PUBLIC_BACKEND_BASE_URL=http://localhost:8001
-NEXT_PUBLIC_LANGGRAPH_BASE_URL=http://localhost:2024
+NEXT_PUBLIC_LANGGRAPH_BASE_URL=http://localhost:8001/api
 ```
+
+Leave these unset for the standard `make dev` / Docker flow, where nginx serves
+the public `/api/langgraph/*` prefix and rewrites it to Gateway's native `/api/*`
+routes.
 
 Requires Node.js 22+ and pnpm 10.26.2+.

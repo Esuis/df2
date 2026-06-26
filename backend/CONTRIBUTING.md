@@ -56,11 +56,8 @@ export OPENAI_API_KEY="your-api-key"
 ### Run the Development Server
 
 ```bash
-# Terminal 1: LangGraph server
+# Gateway API + embedded agent runtime
 make dev
-
-# Terminal 2: Gateway API
-make gateway
 ```
 
 ## Project Structure
@@ -117,6 +114,7 @@ backend/src/
 │   ├── tavily/             # Tavily web search
 │   ├── jina/               # Jina web fetch
 │   ├── firecrawl/          # Firecrawl scraping
+│   ├── fastcrw/            # fastCRW scraping (Firecrawl-compatible)
 │   └── aio_sandbox/        # Docker sandbox
 │
 ├── reflection/              # Dynamic loading

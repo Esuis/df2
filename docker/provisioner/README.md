@@ -20,7 +20,7 @@ The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbo
 
 ### How It Works
 
-1. **Backend Request**: When the backend needs to execute code, it sends a `POST /api/sandboxes` request with a `sandbox_id` and `thread_id`.
+1. **Backend Request**: When the backend needs to execute code, it sends a `POST /api/sandboxes` request with a `sandbox_id`, `thread_id`, and optional `user_id`.
 
 2. **Pod Creation**: The provisioner creates a dedicated Pod in the `deer-flow` namespace with:
    - The sandbox container image (all-in-one-sandbox)
@@ -70,9 +70,12 @@ Create a new sandbox Pod + Service.
 ```json
 {
   "sandbox_id": "abc-123",
-  "thread_id": "thread-456"
+  "thread_id": "thread-456",
+  "user_id": "user-789"
 }
 ```
+
+`user_id` is optional for backwards compatibility and defaults to `default`. When `USERDATA_PVC_NAME` is set, the provisioner uses it to isolate PVC-backed user-data directories.
 
 **Response**:
 ```json
@@ -134,12 +137,36 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `K8S_NAMESPACE` | `deer-flow` | Kubernetes namespace for sandbox resources |
-| `SANDBOX_IMAGE` | `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` | Container image for sandbox Pods |
+| `SANDBOX_IMAGE` | `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` | AIO-compatible container image for sandbox Pods |
 | `SKILLS_HOST_PATH` | - | **Host machine** path to skills directory (must be absolute) |
 | `THREADS_HOST_PATH` | - | **Host machine** path to threads data directory (must be absolute) |
+| `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for skills volume; when set, sandbox Pods use PVC instead of hostPath |
+| `USERDATA_PVC_NAME` | empty (use hostPath) | PVC name for user-data volume; when set, uses PVC with `subPath: deer-flow/users/{user_id}/threads/{thread_id}/user-data` |
 | `KUBECONFIG_PATH` | `/root/.kube/config` | Path to kubeconfig **inside** the provisioner container |
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
+
+### Custom sandbox image
+
+Provisioner-created sandbox Pods use the provisioner's `SANDBOX_IMAGE` environment variable. This is separate from `sandbox.image` in `config.yaml`, which applies to local Docker or Apple Container mode.
+
+For persistent dependencies, build an image that extends the default `all-in-one-sandbox` image and set `SANDBOX_IMAGE` to your published tag. A from-scratch image must remain compatible with the AIO sandbox HTTP API consumed by `agent-sandbox`, keep `/mnt/user-data` writable, and listen on the configured sandbox port.
+
+See [Building a Custom AIO Sandbox Image](../../backend/docs/CONFIGURATION.md#building-a-custom-aio-sandbox-image) for the runtime contract and a minimal Dockerfile example.
+
+### PVC User-Data Upgrade Note
+
+Older provisioner versions mounted PVC user-data from `threads/{thread_id}/user-data`. The user-scoped layout mounts from `deer-flow/users/{user_id}/threads/{thread_id}/user-data`.
+
+If an existing deployment already has PVC-backed user-data under the legacy layout, migrate the DeerFlow data directory before relying on the new PVC subPath. Mount the same PVC path that the gateway uses as its DeerFlow base directory, then run the existing user-isolation migration script:
+
+```bash
+cd backend
+PYTHONPATH=. python scripts/migrate_user_isolation.py --dry-run
+PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
+```
+
+This moves legacy `threads/{thread_id}/user-data` data under `users/<target-user-id>/threads/{thread_id}/user-data`, which matches the new provisioner PVC subPath when the gateway base directory is mounted at `deer-flow/` on the PVC. Use `default` as the target user only when the legacy data should remain in the default no-auth user namespace. Run the migration while no gateway or sandbox Pods are writing to those paths.
 
 ### Important: K8S_API_SERVER Override
 
@@ -211,7 +238,7 @@ curl http://localhost:8002/health
 # Create a sandbox (via provisioner container for internal DNS)
 docker exec deer-flow-provisioner curl -X POST http://localhost:8002/api/sandboxes \
   -H "Content-Type: application/json" \
-  -d '{"sandbox_id":"test-001","thread_id":"thread-001"}'
+  -d '{"sandbox_id":"test-001","thread_id":"thread-001","user_id":"user-001"}'
 
 # Check sandbox status
 docker exec deer-flow-provisioner curl http://localhost:8002/api/sandboxes/test-001
@@ -309,7 +336,7 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
 
 ## Security Considerations
 
-1. **HostPath Volumes**: The provisioner mounts host directories into sandbox Pods. Ensure these paths contain only trusted data.
+1. **HostPath Volumes**: The provisioner mounts host directories into sandbox Pods by default. Ensure these paths contain only trusted data. For production, prefer PVC-based volumes (set `SKILLS_PVC_NAME` and `USERDATA_PVC_NAME`) to avoid node-specific data loss risks.
 
 2. **Resource Limits**: Each sandbox Pod has CPU, memory, and storage limits to prevent resource exhaustion.
 
@@ -322,7 +349,7 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
 ## Future Enhancements
 
 - [ ] Support for custom resource requests/limits per sandbox
-- [ ] PersistentVolume support for larger data requirements
+- [x] PersistentVolume support for larger data requirements
 - [ ] Automatic cleanup of stale sandboxes (timeout-based)
 - [ ] Metrics and monitoring (Prometheus integration)
 - [ ] Multi-cluster support (route to different K8s clusters)

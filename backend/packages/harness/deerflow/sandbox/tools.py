@@ -1,12 +1,14 @@
+import asyncio
+import os
 import posixpath
 import re
 import shlex
+from collections.abc import Callable
 from pathlib import Path
 
-from langchain.tools import ToolRuntime, tool
-from langgraph.typing import ContextT
+from langchain.tools import tool
 
-from deerflow.agents.thread_state import ThreadDataState, ThreadState
+from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.exceptions import (
@@ -19,9 +21,18 @@ from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
+from deerflow.tools.types import Runtime
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
+# A ``{...}`` block holding a single identifier-like placeholder (e.g. ``{id}``
+# in a REST template or ``{port}`` in an f-string). Bash brace expansion such as
+# ``{passwd,shadow}`` or ``{,.bak}`` does NOT match (commas/dots/empty inner).
+_IDENTIFIER_BRACE_BLOCK_PATTERN = re.compile(r"\{([^{}]*)\}")
+_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _FILE_URL_PATTERN = re.compile(r"\bfile://\S+", re.IGNORECASE)
+_URL_WITH_SCHEME_PATTERN = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
+_URL_IN_COMMAND_PATTERN = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s\"'`;&|<>()]+", re.IGNORECASE)
+_DOTDOT_PATH_SEGMENT_PATTERN = re.compile(r"(?:^|[/\\=])\.\.(?:$|[/\\])")
 _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
     "/bin/",
     "/usr/bin/",
@@ -37,6 +48,53 @@ _DEFAULT_GLOB_MAX_RESULTS = 200
 _MAX_GLOB_MAX_RESULTS = 1000
 _DEFAULT_GREP_MAX_RESULTS = 100
 _MAX_GREP_MAX_RESULTS = 500
+_DEFAULT_WRITE_FILE_ERROR_MAX_CHARS = 2000
+
+# Maximum bytes accepted in a single non-append write_file call (issue #3189).
+# Oversized single-shot writes correlate with LLM streaming chunk-gap timeouts
+# because the tool-call JSON payload (which the model must emit as one
+# continuous stream) grows past the safe window. 80 KB ≈ 20K tokens, a
+# comfortable headroom under the factory-default 240s stream_chunk_timeout.
+# Deployments can override via env var DEERFLOW_WRITE_FILE_MAX_BYTES; set to
+# 0 (or negative) to disable the guard entirely.
+_WRITE_FILE_CONTENT_MAX_BYTES = 80 * 1024
+_WRITE_FILE_MAX_BYTES_ENV = "DEERFLOW_WRITE_FILE_MAX_BYTES"
+_LOCAL_BASH_CWD_COMMANDS = {"cd", "pushd"}
+_LOCAL_BASH_COMMAND_WRAPPERS = {"command", "builtin"}
+_LOCAL_BASH_COMMAND_PREFIX_KEYWORDS = {"!", "{", "case", "do", "elif", "else", "for", "if", "select", "then", "time", "until", "while"}
+_LOCAL_BASH_COMMAND_END_KEYWORDS = {"}", "done", "esac", "fi"}
+_LOCAL_BASH_ROOT_PATH_COMMANDS = {
+    "awk",
+    "cat",
+    "cp",
+    "du",
+    "find",
+    "grep",
+    "head",
+    "less",
+    "ln",
+    "ls",
+    "more",
+    "mv",
+    "rm",
+    "sed",
+    "tail",
+    "tar",
+}
+_SHELL_COMMAND_SEPARATORS = {";", "&&", "||", "|", "|&", "&", "(", ")"}
+_SHELL_REDIRECTION_OPERATORS = {
+    "<",
+    ">",
+    "<<",
+    ">>",
+    "<<<",
+    "<>",
+    ">&",
+    "<&",
+    "&>",
+    "&>>",
+    ">|",
+}
 
 
 def _get_skills_container_path() -> str:
@@ -200,8 +258,9 @@ def _get_acp_workspace_host_path(thread_id: str | None = None) -> str | None:
     if thread_id is not None:
         try:
             from deerflow.config.paths import get_paths
+            from deerflow.runtime.user_context import get_effective_user_id
 
-            host_path = get_paths().acp_workspace_dir(thread_id)
+            host_path = get_paths().acp_workspace_dir(thread_id, user_id=get_effective_user_id())
             if host_path.exists():
                 return str(host_path)
         except Exception:
@@ -379,7 +438,7 @@ def _join_path_preserving_style(base: str, relative: str) -> str:
     return f"{stripped_base}{separator}{normalized_relative}"
 
 
-def _sanitize_error(error: Exception, runtime: "ToolRuntime[ContextT, ThreadState] | None" = None) -> str:
+def _sanitize_error(error: Exception, runtime: Runtime | None = None) -> str:
     """Sanitize an error message to avoid leaking host filesystem paths.
 
     In local-sandbox mode, resolved host paths in the error string are masked
@@ -391,6 +450,42 @@ def _sanitize_error(error: Exception, runtime: "ToolRuntime[ContextT, ThreadStat
         thread_data = get_thread_data(runtime)
         msg = mask_local_paths_in_output(msg, thread_data)
     return msg
+
+
+def _truncate_write_file_error_detail(detail: str, max_chars: int) -> str:
+    """Middle-truncate write_file error details, preserving the head and tail."""
+    if max_chars == 0:
+        return detail
+    if len(detail) <= max_chars:
+        return detail
+    total = len(detail)
+    marker_max_len = len(f"\n... [write_file error truncated: {total} chars skipped] ...\n")
+    kept = max(0, max_chars - marker_max_len)
+    if kept == 0:
+        return detail[:max_chars]
+    head_len = kept // 2
+    tail_len = kept - head_len
+    skipped = total - kept
+    marker = f"\n... [write_file error truncated: {skipped} chars skipped] ...\n"
+    return f"{detail[:head_len]}{marker}{detail[-tail_len:] if tail_len > 0 else ''}"
+
+
+def _format_write_file_error(
+    requested_path: str,
+    error: Exception,
+    runtime: Runtime | None = None,
+    *,
+    max_chars: int = _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS,
+) -> str:
+    """Return a bounded, sanitized error string for write_file failures."""
+    header = f"Error: Failed to write file '{requested_path}'"
+    detail = _sanitize_error(error, runtime)
+    if max_chars == 0:
+        return f"{header}: {detail}"
+    detail_budget = max_chars - len(header) - 2
+    if detail_budget <= 0:
+        return _truncate_write_file_error_detail(f"{header}: {detail}", max_chars)
+    return f"{header}: {_truncate_write_file_error_detail(detail, detail_budget)}"
 
 
 def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
@@ -548,7 +643,7 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
     This function is a security gate — it checks whether *path* may be
     accessed and raises on violation.  It does **not** resolve the virtual
     path to a host path; callers are responsible for resolution via
-    ``_resolve_and_validate_user_data_path`` or ``_resolve_skills_path``.
+    ``resolve_and_validate_user_data_path`` or ``_resolve_skills_path``.
 
     Allowed virtual-path families:
       - ``/mnt/user-data/*``  — always allowed (read + write)
@@ -635,6 +730,267 @@ def _resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState
     return str(resolved)
 
 
+def _is_non_file_url_token(token: str) -> bool:
+    """Return True for URL tokens that should not be interpreted as paths."""
+    values = [token]
+    if "=" in token:
+        values.append(token.split("=", 1)[1])
+
+    for value in values:
+        match = _URL_WITH_SCHEME_PATTERN.match(value)
+        if match and not value.lower().startswith("file://"):
+            return True
+    return False
+
+
+def _non_file_url_spans(command: str) -> list[tuple[int, int]]:
+    spans = []
+    for match in _URL_IN_COMMAND_PATTERN.finditer(command):
+        if not match.group().lower().startswith("file://"):
+            spans.append(match.span())
+    return spans
+
+
+def _is_in_spans(position: int, spans: list[tuple[int, int]]) -> bool:
+    return any(start <= position < end for start, end in spans)
+
+
+def _has_dotdot_path_segment(token: str) -> bool:
+    if _is_non_file_url_token(token):
+        return False
+    return bool(_DOTDOT_PATH_SEGMENT_PATTERN.search(token))
+
+
+def _split_shell_tokens(command: str) -> list[str]:
+    try:
+        normalized = command.replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ; ")
+        lexer = shlex.shlex(normalized, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        return list(lexer)
+    except ValueError:
+        # The shell will reject malformed quoting later; keep validation
+        # best-effort instead of turning syntax errors into security messages.
+        return command.split()
+
+
+def _is_shell_command_separator(token: str) -> bool:
+    return token in _SHELL_COMMAND_SEPARATORS
+
+
+def _is_shell_redirection_operator(token: str) -> bool:
+    return token in _SHELL_REDIRECTION_OPERATORS
+
+
+def _is_shell_assignment(token: str) -> bool:
+    name, separator, _ = token.partition("=")
+    if not separator or not name:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name))
+
+
+def _is_allowed_local_bash_absolute_path(path: str, allowed_paths: list[str], *, allow_system_paths: bool) -> bool:
+    # Check for MCP filesystem server allowed paths
+    if any(path.startswith(allowed_path) or path == allowed_path.rstrip("/") for allowed_path in allowed_paths):
+        _reject_path_traversal(path)
+        return True
+
+    if path == VIRTUAL_PATH_PREFIX or path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
+        _reject_path_traversal(path)
+        return True
+
+    # Allow skills container path (resolved by tools.py before passing to sandbox)
+    if _is_skills_path(path):
+        _reject_path_traversal(path)
+        return True
+
+    # Allow ACP workspace path (path-traversal check only)
+    if _is_acp_workspace_path(path):
+        _reject_path_traversal(path)
+        return True
+
+    # Allow custom mount container paths
+    if _is_custom_mount_path(path):
+        _reject_path_traversal(path)
+        return True
+
+    if allow_system_paths and any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in _LOCAL_BASH_SYSTEM_PATH_PREFIXES):
+        return True
+
+    return False
+
+
+def _next_cd_target(tokens: list[str], start_index: int) -> tuple[str | None, int]:
+    index = start_index
+    while index < len(tokens):
+        token = tokens[index]
+        if _is_shell_command_separator(token):
+            return None, index
+        if _is_shell_redirection_operator(token):
+            index += 2
+            continue
+        if token == "--":
+            index += 1
+            continue
+        if token in {"-L", "-P", "-e", "-@"}:
+            index += 1
+            continue
+        if token.startswith("-") and token != "-":
+            index += 1
+            continue
+        return token, index + 1
+    return None, index
+
+
+def _validate_local_bash_cwd_target(command_name: str, target: str | None, allowed_paths: list[str]) -> None:
+    if target is None or target == "-":
+        raise PermissionError(f"Unsafe working directory change in command: {command_name}. Use paths under {VIRTUAL_PATH_PREFIX}")
+    if target.startswith(("$", "`")):
+        raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
+    if target.startswith("~"):
+        raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
+    if target.startswith("/"):
+        _reject_path_traversal(target)
+        if not _is_allowed_local_bash_absolute_path(target, allowed_paths, allow_system_paths=False):
+            raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
+
+
+def _looks_like_unsafe_cwd_target(target: str | None) -> bool:
+    if target is None:
+        return False
+    return target == "-" or target.startswith(("$", "`", "~", "/", "..")) or _has_dotdot_path_segment(target)
+
+
+def _validate_local_bash_root_path_args(command_name: str, tokens: list[str], start_index: int) -> None:
+    if command_name not in _LOCAL_BASH_ROOT_PATH_COMMANDS:
+        return
+
+    index = start_index
+    while index < len(tokens):
+        token = tokens[index]
+        if _is_shell_command_separator(token):
+            return
+        if _is_shell_redirection_operator(token):
+            index += 2
+            continue
+        if token == "/" and not _is_non_file_url_token(token):
+            raise PermissionError(f"Unsafe absolute paths in command: /. Use paths under {VIRTUAL_PATH_PREFIX}")
+        index += 1
+
+
+def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str]) -> None:
+    """Conservatively reject relative path escapes missed by absolute-path scanning."""
+    if re.search(r"\$\([^)]*\b(?:cd|pushd)\b", command):
+        raise PermissionError(f"Unsafe working directory change in command substitution. Use paths under {VIRTUAL_PATH_PREFIX}")
+
+    tokens = _split_shell_tokens(command)
+
+    for token in tokens:
+        if _is_shell_command_separator(token) or _is_shell_redirection_operator(token):
+            continue
+        if _has_dotdot_path_segment(token):
+            raise PermissionError("Access denied: path traversal detected")
+
+    at_command_start = True
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+
+        if _is_shell_command_separator(token):
+            at_command_start = True
+            index += 1
+            continue
+
+        if _is_shell_redirection_operator(token):
+            index += 1
+            continue
+
+        if at_command_start and _is_shell_assignment(token):
+            index += 1
+            continue
+
+        command_name = token.rsplit("/", 1)[-1]
+        if at_command_start and command_name in _LOCAL_BASH_COMMAND_PREFIX_KEYWORDS | _LOCAL_BASH_COMMAND_END_KEYWORDS:
+            index += 1
+            continue
+
+        if not at_command_start:
+            index += 1
+            continue
+
+        at_command_start = False
+        if command_name in _LOCAL_BASH_COMMAND_WRAPPERS and index + 1 < len(tokens):
+            wrapped_name = tokens[index + 1].rsplit("/", 1)[-1]
+            if wrapped_name in _LOCAL_BASH_CWD_COMMANDS:
+                target, next_index = _next_cd_target(tokens, index + 2)
+                _validate_local_bash_cwd_target(wrapped_name, target, allowed_paths)
+                index = next_index
+                continue
+            _validate_local_bash_root_path_args(wrapped_name, tokens, index + 2)
+
+        if command_name not in _LOCAL_BASH_CWD_COMMANDS:
+            _validate_local_bash_root_path_args(command_name, tokens, index + 1)
+            index += 1
+            continue
+
+        target, next_index = _next_cd_target(tokens, index + 1)
+        _validate_local_bash_cwd_target(command_name, target, allowed_paths)
+        index = next_index
+
+
+def resolve_and_validate_user_data_path(path: str, thread_data: ThreadDataState) -> str:
+    """Resolve a /mnt/user-data virtual path and validate it stays in bounds."""
+    return _resolve_and_validate_user_data_path(path, thread_data)
+
+
+def _braces_are_identifier_placeholders_only(fragment: str) -> bool:
+    """Return True only if every ``{...}`` block is a single identifier placeholder.
+
+    Identifier-only blocks (``{id}``, ``{port}``) come from REST templates and
+    f-strings and are text. Bash brace expansion (``{passwd,shadow}``, ``{,.bak}``,
+    ``{etc,var}``) reconstitutes real host paths at runtime, so it must NOT be
+    exempted. Stray, empty, or nested braces are rejected too (each ``{``/``}``
+    must belong to one balanced single-placeholder block).
+
+    ``${VAR}`` shell variable expansion (e.g. ``/home/${USER}/.ssh/id_rsa``) also
+    expands to a real host path at runtime, so a ``${`` anywhere disqualifies the
+    fragment even though the inner name is identifier-shaped.
+    """
+    if "${" in fragment:
+        return False
+    blocks = _IDENTIFIER_BRACE_BLOCK_PATTERN.findall(fragment)
+    # Every brace must be part of a balanced ``{...}`` block (no stray/nested braces).
+    if fragment.count("{") != len(blocks) or fragment.count("}") != len(blocks):
+        return False
+    return all(_IDENTIFIER_PATTERN.fullmatch(inner) for inner in blocks)
+
+
+def _is_non_path_literal_fragment(fragment: str) -> bool:
+    """Return True if a ``/segment`` match is almost certainly text, not a path.
+
+    The absolute-path scan runs over the raw command string, so it also matches
+    ``/segment`` sequences sitting inside string literals, f-strings, and
+    templates (e.g. ``python -c "print(f'/端口{port}')"`` or a REST template
+    like ``/devices/{id}/port``). Non-ASCII characters and single identifier-like
+    ``{placeholder}`` braces do not appear in real host filesystem paths a command
+    would open, so treating such fragments as text removes those false positives.
+
+    Bash brace expansion (``cat /etc/{passwd,shadow}``) is deliberately NOT
+    exempted: it expands to plain host paths at runtime, so only braces that are
+    single identifier placeholders are treated as text (see
+    :func:`_braces_are_identifier_placeholders_only`).
+
+    This guard is best-effort, not a security boundary (see
+    :func:`validate_local_bash_command_paths`): plain ASCII host paths such as
+    ``/etc/passwd`` contain none of these markers and are still rejected.
+    """
+    if any(ord(ch) > 127 for ch in fragment):
+        return True
+    if "{" in fragment or "}" in fragment:
+        return _braces_are_identifier_placeholders_only(fragment)
+    return False
+
+
 def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
     """Validate absolute paths in local-sandbox bash commands.
 
@@ -660,33 +1016,16 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
 
     unsafe_paths: list[str] = []
     allowed_paths = _get_mcp_allowed_paths()
+    _validate_local_bash_shell_tokens(command, allowed_paths)
+    url_spans = _non_file_url_spans(command)
 
-    for absolute_path in _ABSOLUTE_PATH_PATTERN.findall(command):
-        # Check for MCP filesystem server allowed paths
-        if any(absolute_path.startswith(path) or absolute_path == path.rstrip("/") for path in allowed_paths):
-            _reject_path_traversal(absolute_path)
+    for match in _ABSOLUTE_PATH_PATTERN.finditer(command):
+        if _is_in_spans(match.start(), url_spans):
             continue
-
-        if absolute_path == VIRTUAL_PATH_PREFIX or absolute_path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
-            _reject_path_traversal(absolute_path)
+        absolute_path = match.group()
+        if _is_non_path_literal_fragment(absolute_path):
             continue
-
-        # Allow skills container path (resolved by tools.py before passing to sandbox)
-        if _is_skills_path(absolute_path):
-            _reject_path_traversal(absolute_path)
-            continue
-
-        # Allow ACP workspace path (path-traversal check only)
-        if _is_acp_workspace_path(absolute_path):
-            _reject_path_traversal(absolute_path)
-            continue
-
-        # Allow custom mount container paths
-        if _is_custom_mount_path(absolute_path):
-            _reject_path_traversal(absolute_path)
-            continue
-
-        if any(absolute_path == prefix.rstrip("/") or absolute_path.startswith(prefix) for prefix in _LOCAL_BASH_SYSTEM_PATH_PREFIXES):
+        if _is_allowed_local_bash_absolute_path(absolute_path, allowed_paths, allow_system_paths=True):
             continue
 
         unsafe_paths.append(absolute_path)
@@ -760,7 +1099,7 @@ def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None) -> str:
     return command
 
 
-def get_thread_data(runtime: ToolRuntime[ContextT, ThreadState] | None) -> ThreadDataState | None:
+def get_thread_data(runtime: Runtime | None) -> ThreadDataState | None:
     """Extract thread_data from runtime state."""
     if runtime is None:
         return None
@@ -769,11 +1108,12 @@ def get_thread_data(runtime: ToolRuntime[ContextT, ThreadState] | None) -> Threa
     return runtime.state.get("thread_data")
 
 
-def is_local_sandbox(runtime: ToolRuntime[ContextT, ThreadState] | None) -> bool:
+def is_local_sandbox(runtime: Runtime | None) -> bool:
     """Check if the current sandbox is a local sandbox.
 
-    Path replacement is only needed for local sandbox since aio sandbox
-    already has /mnt/user-data mounted in the container.
+    Accepts both the legacy generic id ``"local"`` (acquire with no thread
+    context) and the per-thread id format ``"local:{thread_id}"`` produced by
+    :meth:`LocalSandboxProvider.acquire` once a thread is known.
     """
     if runtime is None:
         return False
@@ -782,10 +1122,13 @@ def is_local_sandbox(runtime: ToolRuntime[ContextT, ThreadState] | None) -> bool
     sandbox_state = runtime.state.get("sandbox")
     if sandbox_state is None:
         return False
-    return sandbox_state.get("sandbox_id") == "local"
+    sandbox_id = sandbox_state.get("sandbox_id")
+    if not isinstance(sandbox_id, str):
+        return False
+    return sandbox_id == "local" or sandbox_id.startswith("local:")
 
 
-def sandbox_from_runtime(runtime: ToolRuntime[ContextT, ThreadState] | None = None) -> Sandbox:
+def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
     """Extract sandbox instance from tool runtime.
 
     DEPRECATED: Use ensure_sandbox_initialized() for lazy initialization support.
@@ -814,7 +1157,7 @@ def sandbox_from_runtime(runtime: ToolRuntime[ContextT, ThreadState] | None = No
     return sandbox
 
 
-def ensure_sandbox_initialized(runtime: ToolRuntime[ContextT, ThreadState] | None = None) -> Sandbox:
+def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     """Ensure sandbox is initialized, acquiring lazily if needed.
 
     On first call, acquires a sandbox from the provider and stores it in runtime state.
@@ -873,7 +1216,69 @@ def ensure_sandbox_initialized(runtime: ToolRuntime[ContextT, ThreadState] | Non
     return sandbox
 
 
-def ensure_thread_directories_exist(runtime: ToolRuntime[ContextT, ThreadState] | None) -> None:
+async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sandbox:
+    """Async counterpart to ``ensure_sandbox_initialized`` for tool runtimes.
+
+    This keeps lazy sandbox acquisition on the async provider hook, so AIO
+    sandbox startup and readiness polling do not fall back to synchronous
+    ``provider.acquire()`` during async tool execution.
+    """
+    if runtime is None:
+        raise SandboxRuntimeError("Tool runtime not available")
+
+    if runtime.state is None:
+        raise SandboxRuntimeError("Tool runtime state not available")
+
+    sandbox_state = runtime.state.get("sandbox")
+    if sandbox_state is not None:
+        sandbox_id = sandbox_state.get("sandbox_id")
+        if sandbox_id is not None:
+            sandbox = get_sandbox_provider().get(sandbox_id)
+            if sandbox is not None:
+                if runtime.context is not None:
+                    runtime.context["sandbox_id"] = sandbox_id
+                return sandbox
+
+    thread_id = runtime.context.get("thread_id") if runtime.context else None
+    if thread_id is None:
+        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+    if thread_id is None:
+        raise SandboxRuntimeError("Thread ID not available in runtime context")
+
+    provider = get_sandbox_provider()
+    sandbox_id = await provider.acquire_async(thread_id)
+
+    runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
+
+    sandbox = provider.get(sandbox_id)
+    if sandbox is None:
+        raise SandboxNotFoundError("Sandbox not found after acquisition", sandbox_id=sandbox_id)
+
+    if runtime.context is not None:
+        runtime.context["sandbox_id"] = sandbox_id
+    return sandbox
+
+
+async def _run_sync_tool_after_async_sandbox_init(
+    func: Callable[..., str] | None,
+    runtime: Runtime,
+    *args: object,
+) -> str:
+    """Initialize lazily via async provider, then run sync tool body off-thread."""
+    try:
+        await ensure_sandbox_initialized_async(runtime)
+    except SandboxError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error: Unexpected error initializing sandbox: {_sanitize_error(e, runtime)}"
+
+    if func is None:
+        return "Error: Tool implementation not available"
+
+    return await asyncio.to_thread(func, runtime, *args)
+
+
+def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
     """Ensure thread data directories (workspace, uploads, outputs) exist.
 
     This function is called lazily when any sandbox tool is first used.
@@ -987,7 +1392,7 @@ def _truncate_ls_output(output: str, max_chars: int) -> str:
 
 
 @tool("bash", parse_docstring=True)
-def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, command: str) -> str:
+def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     """Execute a bash command in a Linux environment.
 
 
@@ -1035,8 +1440,15 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
         return f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}"
 
 
+async def _bash_tool_async(runtime: Runtime, description: str, command: str) -> str:
+    return await _run_sync_tool_after_async_sandbox_init(bash_tool.func, runtime, description, command)
+
+
+bash_tool.coroutine = _bash_tool_async
+
+
 @tool("ls", parse_docstring=True)
-def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path: str) -> str:
+def ls_tool(runtime: Runtime, description: str, path: str) -> str:
     """List the contents of a directory up to 2 levels deep in tree format.
 
     Args:
@@ -1047,6 +1459,7 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
+        thread_data = None
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data, read_only=True)
@@ -1061,6 +1474,8 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         if not children:
             return "(empty)"
         output = "\n".join(children)
+        if thread_data is not None:
+            output = mask_local_paths_in_output(output, thread_data)
         try:
             from deerflow.config.app_config import get_app_config
 
@@ -1079,9 +1494,16 @@ def ls_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, path:
         return f"Error: Unexpected error listing directory: {_sanitize_error(e, runtime)}"
 
 
+async def _ls_tool_async(runtime: Runtime, description: str, path: str) -> str:
+    return await _run_sync_tool_after_async_sandbox_init(ls_tool.func, runtime, description, path)
+
+
+ls_tool.coroutine = _ls_tool_async
+
+
 @tool("glob", parse_docstring=True)
 def glob_tool(
-    runtime: ToolRuntime[ContextT, ThreadState],
+    runtime: Runtime,
     description: str,
     pattern: str,
     path: str,
@@ -1129,9 +1551,31 @@ def glob_tool(
         return f"Error: Unexpected error searching paths: {_sanitize_error(e, runtime)}"
 
 
+async def _glob_tool_async(
+    runtime: Runtime,
+    description: str,
+    pattern: str,
+    path: str,
+    include_dirs: bool = False,
+    max_results: int = _DEFAULT_GLOB_MAX_RESULTS,
+) -> str:
+    return await _run_sync_tool_after_async_sandbox_init(
+        glob_tool.func,
+        runtime,
+        description,
+        pattern,
+        path,
+        include_dirs,
+        max_results,
+    )
+
+
+glob_tool.coroutine = _glob_tool_async
+
+
 @tool("grep", parse_docstring=True)
 def grep_tool(
-    runtime: ToolRuntime[ContextT, ThreadState],
+    runtime: Runtime,
     description: str,
     pattern: str,
     path: str,
@@ -1199,9 +1643,35 @@ def grep_tool(
         return f"Error: Unexpected error searching file contents: {_sanitize_error(e, runtime)}"
 
 
+async def _grep_tool_async(
+    runtime: Runtime,
+    description: str,
+    pattern: str,
+    path: str,
+    glob: str | None = None,
+    literal: bool = False,
+    case_sensitive: bool = False,
+    max_results: int = _DEFAULT_GREP_MAX_RESULTS,
+) -> str:
+    return await _run_sync_tool_after_async_sandbox_init(
+        grep_tool.func,
+        runtime,
+        description,
+        pattern,
+        path,
+        glob,
+        literal,
+        case_sensitive,
+        max_results,
+    )
+
+
+grep_tool.coroutine = _grep_tool_async
+
+
 @tool("read_file", parse_docstring=True)
 def read_file_tool(
-    runtime: ToolRuntime[ContextT, ThreadState],
+    runtime: Runtime,
     description: str,
     path: str,
     start_line: int | None = None,
@@ -1250,29 +1720,99 @@ def read_file_tool(
         return f"Error: Permission denied reading file: {requested_path}"
     except IsADirectoryError:
         return f"Error: Path is a directory, not a file: {requested_path}"
+    except UnicodeDecodeError:
+        return (
+            f"Error: cannot read '{requested_path}' as text — it appears to be a binary file "
+            "(e.g. .xlsx, .pdf, or an image). read_file only supports UTF-8 text. Use bash with a "
+            "suitable library instead (pandas/openpyxl for spreadsheets), or view_image for images."
+        )
     except Exception as e:
         return f"Error: Unexpected error reading file: {_sanitize_error(e, runtime)}"
 
 
+async def _read_file_tool_async(
+    runtime: Runtime,
+    description: str,
+    path: str,
+    start_line: int | None = None,
+    end_line: int | None = None,
+) -> str:
+    return await _run_sync_tool_after_async_sandbox_init(read_file_tool.func, runtime, description, path, start_line, end_line)
+
+
+read_file_tool.coroutine = _read_file_tool_async
+
+
+def _effective_write_file_max_bytes() -> int:
+    """Return the active size cap for non-append write_file calls.
+
+    Reads ``DEERFLOW_WRITE_FILE_MAX_BYTES`` at call time (not import time)
+    so tests and runtime tweaks take effect without restart. Falls back to
+    the default on missing/malformed values. A non-positive value disables
+    the guard.
+    """
+    raw = os.environ.get(_WRITE_FILE_MAX_BYTES_ENV)
+    if raw is None:
+        return _WRITE_FILE_CONTENT_MAX_BYTES
+    try:
+        return int(raw)
+    except ValueError:
+        return _WRITE_FILE_CONTENT_MAX_BYTES
+
+
 @tool("write_file", parse_docstring=True)
 def write_file_tool(
-    runtime: ToolRuntime[ContextT, ThreadState],
+    runtime: Runtime,
     description: str,
     path: str,
     content: str,
     append: bool = False,
 ) -> str:
-    """Write text content to a file.
+    """Write text content to a file. By default this overwrites the target file; set append=True to add content to the end without replacing existing content.
+
+    SIZE POLICY (issue #3189):
+    A single non-append write_file call must not exceed 80 KB of UTF-8 content.
+    Oversized single-shot writes correlate with LLM streaming chunk-gap
+    timeouts because the tool-call JSON payload — which the model must emit as
+    one continuous stream — grows past the safe window. For larger documents,
+    use ONE of these strategies (write_file rejects oversized payloads with an
+    actionable error):
+
+      1. INCREMENTAL EDIT (preferred for revisions): after the initial write,
+         use `str_replace` to surgically update sections. This is the same
+         pattern Claude Code's Write+Edit and OpenAI Codex's apply_patch use,
+         and keeps each tool call's payload small.
+      2. APPEND-IN-CHUNKS (for new long-form content): split the document into
+         sections, each well under 80 KB. First call uses append=False to
+         create the file; subsequent calls use append=True. The 80 KB cap does
+         NOT apply to append=True calls.
+
+    Operators can override the cap via env var `DEERFLOW_WRITE_FILE_MAX_BYTES`
+    (0 disables the guard entirely). Raising it risks streaming timeouts.
 
     Args:
         description: Explain why you are writing to this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         path: The **absolute** path to the file to write to. ALWAYS PROVIDE THIS PARAMETER SECOND.
         content: The content to write to the file. ALWAYS PROVIDE THIS PARAMETER THIRD.
+        append: Whether to append content to the end of the file instead of overwriting it. Defaults to False.
     """
+    if not append:
+        max_bytes = _effective_write_file_max_bytes()
+        if max_bytes > 0:
+            content_bytes = len(content.encode("utf-8"))
+            if content_bytes > max_bytes:
+                return (
+                    f"Error: write_file content ({content_bytes} bytes) exceeds the "
+                    f"{max_bytes}-byte single-call limit. Split the content into smaller "
+                    "pieces: either (a) write the first section now, then use `str_replace` "
+                    "for further edits, or (b) call write_file again with append=True "
+                    "carrying the next section. See SIZE POLICY in the tool docstring "
+                    "or issue #3189 for the rationale."
+                )
     try:
+        requested_path = path
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)
@@ -1283,20 +1823,39 @@ def write_file_tool(
             sandbox.write_file(path, content, append)
         return "OK"
     except SandboxError as e:
-        return f"Error: {e}"
+        return _format_write_file_error(requested_path, e, runtime)
     except PermissionError:
-        return f"Error: Permission denied writing to file: {requested_path}"
+        return _truncate_write_file_error_detail(
+            f"Error: Permission denied writing to file: {requested_path}",
+            _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS,
+        )
     except IsADirectoryError:
-        return f"Error: Path is a directory, not a file: {requested_path}"
+        return _truncate_write_file_error_detail(
+            f"Error: Path is a directory, not a file: {requested_path}",
+            _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS,
+        )
     except OSError as e:
-        return f"Error: Failed to write file '{requested_path}': {_sanitize_error(e, runtime)}"
+        return _format_write_file_error(requested_path, e, runtime)
     except Exception as e:
-        return f"Error: Unexpected error writing file: {_sanitize_error(e, runtime)}"
+        return _format_write_file_error(requested_path, e, runtime)
+
+
+async def _write_file_tool_async(
+    runtime: Runtime,
+    description: str,
+    path: str,
+    content: str,
+    append: bool = False,
+) -> str:
+    return await _run_sync_tool_after_async_sandbox_init(write_file_tool.func, runtime, description, path, content, append)
+
+
+write_file_tool.coroutine = _write_file_tool_async
 
 
 @tool("str_replace", parse_docstring=True)
 def str_replace_tool(
-    runtime: ToolRuntime[ContextT, ThreadState],
+    runtime: Runtime,
     description: str,
     path: str,
     old_str: str,
@@ -1343,3 +1902,25 @@ def str_replace_tool(
         return f"Error: Permission denied accessing file: {requested_path}"
     except Exception as e:
         return f"Error: Unexpected error replacing string: {_sanitize_error(e, runtime)}"
+
+
+async def _str_replace_tool_async(
+    runtime: Runtime,
+    description: str,
+    path: str,
+    old_str: str,
+    new_str: str,
+    replace_all: bool = False,
+) -> str:
+    return await _run_sync_tool_after_async_sandbox_init(
+        str_replace_tool.func,
+        runtime,
+        description,
+        path,
+        old_str,
+        new_str,
+        replace_all,
+    )
+
+
+str_replace_tool.coroutine = _str_replace_tool_async

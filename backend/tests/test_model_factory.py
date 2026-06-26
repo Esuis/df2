@@ -30,6 +30,7 @@ def _make_model(
     supports_thinking: bool = False,
     supports_reasoning_effort: bool = False,
     when_thinking_enabled: dict | None = None,
+    when_thinking_disabled: dict | None = None,
     thinking: dict | None = None,
     max_tokens: int | None = None,
 ) -> ModelConfig:
@@ -43,6 +44,7 @@ def _make_model(
         supports_thinking=supports_thinking,
         supports_reasoning_effort=supports_reasoning_effort,
         when_thinking_enabled=when_thinking_enabled,
+        when_thinking_disabled=when_thinking_disabled,
         thinking=thinking,
         supports_vision=False,
     )
@@ -245,6 +247,136 @@ def test_thinking_disabled_no_when_thinking_enabled_does_nothing(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# when_thinking_disabled config
+# ---------------------------------------------------------------------------
+
+
+def test_when_thinking_disabled_takes_precedence_over_hardcoded_disable(monkeypatch):
+    """When when_thinking_disabled is set, it takes full precedence over the
+    hardcoded disable logic (extra_body.thinking.type=disabled etc.)."""
+    wte = {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 10000}}}
+    wtd = {"extra_body": {"thinking": {"type": "disabled"}}, "reasoning_effort": "low"}
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "custom-disable",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+                when_thinking_enabled=wte,
+                when_thinking_disabled=wtd,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="custom-disable", thinking_enabled=False)
+
+    assert captured.get("extra_body") == {"thinking": {"type": "disabled"}}
+    # User overrode the hardcoded "minimal" with "low"
+    assert captured.get("reasoning_effort") == "low"
+
+
+def test_when_thinking_disabled_not_used_when_thinking_enabled(monkeypatch):
+    """when_thinking_disabled must have no effect when thinking_enabled=True."""
+    wte = {"extra_body": {"thinking": {"type": "enabled"}}}
+    wtd = {"extra_body": {"thinking": {"type": "disabled"}}}
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "wtd-ignored",
+                supports_thinking=True,
+                when_thinking_enabled=wte,
+                when_thinking_disabled=wtd,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="wtd-ignored", thinking_enabled=True)
+
+    # when_thinking_enabled should apply, NOT when_thinking_disabled
+    assert captured.get("extra_body") == {"thinking": {"type": "enabled"}}
+
+
+def test_when_thinking_disabled_without_when_thinking_enabled_still_applies(monkeypatch):
+    """when_thinking_disabled alone (no when_thinking_enabled) should still apply its settings."""
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "wtd-only",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+                when_thinking_disabled={"reasoning_effort": "low"},
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="wtd-only", thinking_enabled=False)
+
+    # when_thinking_disabled is now gated independently of has_thinking_settings
+    assert captured.get("reasoning_effort") == "low"
+
+
+def test_when_thinking_disabled_excluded_from_model_dump(monkeypatch):
+    """when_thinking_disabled must not leak into the model constructor kwargs."""
+    wte = {"extra_body": {"thinking": {"type": "enabled"}}}
+    wtd = {"extra_body": {"thinking": {"type": "disabled"}}}
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "no-leak-wtd",
+                supports_thinking=True,
+                when_thinking_enabled=wte,
+                when_thinking_disabled=wtd,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="no-leak-wtd", thinking_enabled=True)
+
+    # when_thinking_disabled value must NOT appear as a raw key
+    assert "when_thinking_disabled" not in captured
+
+
+# ---------------------------------------------------------------------------
 # reasoning_effort stripping
 # ---------------------------------------------------------------------------
 
@@ -434,11 +566,11 @@ def test_thinking_shortcut_not_leaked_into_model_when_disabled(monkeypatch):
 def test_openai_compatible_provider_passes_base_url(monkeypatch):
     """OpenAI-compatible providers like MiniMax should pass base_url through to the model."""
     model = ModelConfig(
-        name="minimax-m2.5",
-        display_name="MiniMax M2.5",
+        name="minimax-m3",
+        display_name="MiniMax M3",
         description=None,
         use="langchain_openai:ChatOpenAI",
-        model="MiniMax-M2.5",
+        model="MiniMax-M3",
         base_url="https://api.minimax.io/v1",
         api_key="test-key",
         max_tokens=4096,
@@ -458,23 +590,116 @@ def test_openai_compatible_provider_passes_base_url(monkeypatch):
 
     monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
 
-    factory_module.create_chat_model(name="minimax-m2.5")
+    factory_module.create_chat_model(name="minimax-m3")
 
-    assert captured.get("model") == "MiniMax-M2.5"
+    assert captured.get("model") == "MiniMax-M3"
     assert captured.get("base_url") == "https://api.minimax.io/v1"
     assert captured.get("api_key") == "test-key"
     assert captured.get("temperature") == 1.0
     assert captured.get("max_tokens") == 4096
+    assert captured.get("stream_usage") is True
+
+
+def test_openai_compatible_provider_respects_explicit_stream_usage(monkeypatch):
+    """Explicit stream_usage should not be overwritten by the factory default."""
+    model = ModelConfig(
+        name="minimax-m3",
+        display_name="MiniMax M3",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="MiniMax-M3",
+        base_url="https://api.minimax.io/v1",
+        api_key="test-key",
+        stream_usage=False,
+        supports_vision=True,
+        supports_thinking=False,
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="minimax-m3")
+
+    assert captured.get("stream_usage") is False
+
+
+def test_openai_compatible_provider_enables_stream_usage_for_openai_api_base(monkeypatch):
+    """openai_api_base should trigger stream_usage default for ChatOpenAI."""
+    model = ModelConfig(
+        name="openai-compatible",
+        display_name="OpenAI-Compatible",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="example-model",
+        openai_api_base="https://example.com/v1",
+        api_key="test-key",
+        supports_vision=False,
+        supports_thinking=False,
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="openai-compatible")
+
+    assert captured.get("openai_api_base") == "https://example.com/v1"
+    assert captured.get("stream_usage") is True
+
+
+def test_non_openai_provider_does_not_receive_stream_usage_default(monkeypatch):
+    """Non-OpenAI providers with base_url should not receive stream_usage by default."""
+    model = ModelConfig(
+        name="ollama-local",
+        display_name="Ollama Local",
+        description=None,
+        use="langchain_ollama:ChatOllama",
+        model="qwen2.5",
+        base_url="http://127.0.0.1:11434",
+        supports_vision=False,
+        supports_thinking=False,
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="ollama-local")
+
+    assert captured.get("base_url") == "http://127.0.0.1:11434"
+    assert "stream_usage" not in captured
 
 
 def test_openai_compatible_provider_multiple_models(monkeypatch):
     """Multiple models from the same OpenAI-compatible provider should coexist."""
     m1 = ModelConfig(
-        name="minimax-m2.5",
-        display_name="MiniMax M2.5",
+        name="minimax-m3",
+        display_name="MiniMax M3",
         description=None,
         use="langchain_openai:ChatOpenAI",
-        model="MiniMax-M2.5",
+        model="MiniMax-M3",
         base_url="https://api.minimax.io/v1",
         api_key="test-key",
         temperature=1.0,
@@ -482,15 +707,15 @@ def test_openai_compatible_provider_multiple_models(monkeypatch):
         supports_thinking=False,
     )
     m2 = ModelConfig(
-        name="minimax-m2.5-highspeed",
-        display_name="MiniMax M2.5 Highspeed",
+        name="minimax-m2.7-highspeed",
+        display_name="MiniMax M2.7 Highspeed",
         description=None,
         use="langchain_openai:ChatOpenAI",
-        model="MiniMax-M2.5-highspeed",
+        model="MiniMax-M2.7-highspeed",
         base_url="https://api.minimax.io/v1",
         api_key="test-key",
         temperature=1.0,
-        supports_vision=True,
+        supports_vision=False,  # M2.7 is text-only; M3 supports vision
         supports_thinking=False,
     )
     cfg = _make_app_config([m1, m2])
@@ -506,12 +731,12 @@ def test_openai_compatible_provider_multiple_models(monkeypatch):
     monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
 
     # Create first model
-    factory_module.create_chat_model(name="minimax-m2.5")
-    assert captured.get("model") == "MiniMax-M2.5"
+    factory_module.create_chat_model(name="minimax-m3")
+    assert captured.get("model") == "MiniMax-M3"
 
     # Create second model
-    factory_module.create_chat_model(name="minimax-m2.5-highspeed")
-    assert captured.get("model") == "MiniMax-M2.5-highspeed"
+    factory_module.create_chat_model(name="minimax-m2.7-highspeed")
+    assert captured.get("model") == "MiniMax-M2.7-highspeed"
 
 
 # ---------------------------------------------------------------------------
@@ -661,6 +886,84 @@ def test_thinking_disabled_vllm_enable_thinking_format(monkeypatch):
     assert captured.get("reasoning_effort") is None
 
 
+# ---------------------------------------------------------------------------
+# stream_usage injection
+# ---------------------------------------------------------------------------
+
+
+class _FakeWithStreamUsage(FakeChatModel):
+    """Fake model that declares stream_usage in model_fields (like BaseChatOpenAI)."""
+
+    stream_usage: bool | None = None
+
+
+def test_stream_usage_injected_for_openai_compatible_model(monkeypatch):
+    """Factory should set stream_usage=True for models with stream_usage field."""
+    cfg = _make_app_config([_make_model("deepseek", use="langchain_deepseek:ChatDeepSeek")])
+    _patch_factory(monkeypatch, cfg, model_class=_FakeWithStreamUsage)
+
+    captured: dict = {}
+
+    class CapturingModel(_FakeWithStreamUsage):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="deepseek")
+
+    assert captured.get("stream_usage") is True
+
+
+def test_stream_usage_not_injected_for_non_openai_model(monkeypatch):
+    """Factory should NOT inject stream_usage for models without the field."""
+    cfg = _make_app_config([_make_model("claude", use="langchain_anthropic:ChatAnthropic")])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="claude")
+
+    assert "stream_usage" not in captured
+
+
+def test_stream_usage_not_overridden_when_explicitly_set_in_config(monkeypatch):
+    """If config dumps stream_usage=False, factory should respect it."""
+    cfg = _make_app_config([_make_model("deepseek", use="langchain_deepseek:ChatDeepSeek")])
+    _patch_factory(monkeypatch, cfg, model_class=_FakeWithStreamUsage)
+
+    captured: dict = {}
+
+    class CapturingModel(_FakeWithStreamUsage):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    # Simulate config having stream_usage explicitly set by patching model_dump
+    original_get_model_config = cfg.get_model_config
+
+    def patched_get_model_config(name):
+        mc = original_get_model_config(name)
+        mc.stream_usage = False  # type: ignore[attr-defined]
+        return mc
+
+    monkeypatch.setattr(cfg, "get_model_config", patched_get_model_config)
+
+    factory_module.create_chat_model(name="deepseek")
+
+    assert captured.get("stream_usage") is False
+
+
 def test_openai_responses_api_settings_are_passed_to_chatopenai(monkeypatch):
     model = ModelConfig(
         name="gpt-5-responses",
@@ -690,3 +993,192 @@ def test_openai_responses_api_settings_are_passed_to_chatopenai(monkeypatch):
 
     assert captured.get("use_responses_api") is True
     assert captured.get("output_version") == "responses/v1"
+
+
+# ---------------------------------------------------------------------------
+# Provider class path resolution
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("model_id", ["mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-flash"])
+def test_create_chat_model_resolves_patched_mimo_provider(model_id):
+    from deerflow.models.patched_mimo import PatchedChatMiMo
+
+    model = ModelConfig(
+        name=f"{model_id}-thinking",
+        display_name=f"{model_id} Thinking",
+        description=None,
+        use="deerflow.models.patched_mimo:PatchedChatMiMo",
+        model=model_id,
+        api_key="test-key",
+        base_url="https://api.xiaomimimo.com/v1",
+        supports_thinking=True,
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
+        supports_vision=False,
+    )
+    cfg = _make_app_config([model])
+
+    chat_model = factory_module.create_chat_model(
+        name=f"{model_id}-thinking",
+        thinking_enabled=True,
+        app_config=cfg,
+        attach_tracing=False,
+    )
+
+    assert isinstance(chat_model, PatchedChatMiMo)
+    assert chat_model.model_name == model_id
+    assert chat_model.extra_body["thinking"]["type"] == "enabled"
+
+
+# ---------------------------------------------------------------------------
+# Duplicate keyword argument collision (issue #1977)
+# ---------------------------------------------------------------------------
+
+
+def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disabled(monkeypatch):
+    """When reasoning_effort is set in config.yaml (extra field) AND the thinking-disabled
+    path also injects reasoning_effort=minimal into kwargs, the factory must not raise
+    TypeError: got multiple values for keyword argument 'reasoning_effort'."""
+    wte = {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 5000}}}
+    # ModelConfig.extra="allow" means extra fields from config.yaml land in model_dump()
+    model = ModelConfig(
+        name="doubao-model",
+        display_name="Doubao 1.8",
+        description=None,
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        model="doubao-seed-1-8-250315",
+        reasoning_effort="high",  # user-set extra field in config.yaml
+        supports_thinking=True,
+        supports_reasoning_effort=True,
+        when_thinking_enabled=wte,
+        supports_vision=False,
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+
+    # Must not raise TypeError
+    factory_module.create_chat_model(name="doubao-model", thinking_enabled=False)
+
+    # kwargs (runtime) takes precedence: thinking-disabled path sets reasoning_effort=minimal
+    assert captured.get("reasoning_effort") == "minimal"
+
+
+# ---------------------------------------------------------------------------
+# stream_chunk_timeout default injection (issue #3189)
+# ---------------------------------------------------------------------------
+
+
+def test_stream_chunk_timeout_defaults_to_240_for_openai_compatible_model(monkeypatch):
+    """OpenAI-compatible clients must receive a generous 240s chunk-gap budget by
+    default, so reasoning models with long thinking pauses don't trip
+    langchain-openai's aggressive 60s built-in default.
+    """
+    model = _make_model(use="langchain_openai:ChatOpenAI")
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    factory_module.create_chat_model(name="test-model")
+
+    assert captured.get("stream_chunk_timeout") == 240.0
+
+
+def test_stream_chunk_timeout_user_value_not_overridden(monkeypatch):
+    """If the user explicitly sets stream_chunk_timeout in config.yaml, the
+    factory must not overwrite it with the default — even if the value is
+    smaller (60s) or larger (600s) than the default.
+    """
+    model = ModelConfig(
+        name="custom-timeout-model",
+        display_name="Custom Timeout",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-4o-mini",
+        stream_chunk_timeout=60.0,  # user-set explicit value
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    factory_module.create_chat_model(name="custom-timeout-model")
+
+    assert captured.get("stream_chunk_timeout") == 60.0
+
+
+def test_stream_chunk_timeout_not_injected_for_non_openai_provider(monkeypatch):
+    """Only langchain_openai:ChatOpenAI receives the default. Anthropic / Vertex /
+    other clients that don't understand this kwarg must not be polluted with it.
+    """
+    model = _make_model(use="langchain_anthropic:ChatAnthropic")
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    factory_module.create_chat_model(name="test-model")
+
+    assert "stream_chunk_timeout" not in captured
+
+
+def test_stream_chunk_timeout_default_constant_is_documented():
+    """Lock the default value at 240s. If we ever want to change this, the
+    deliberate update here (and the docstring on _apply_stream_chunk_timeout_default)
+    forces a paired review of the rationale comment block above the constant.
+    """
+    assert factory_module._DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS == 240.0
+
+
+def test_stream_chunk_timeout_popped_for_non_openai_provider_when_user_set_it(monkeypatch):
+    """Regression for CR feedback on issue #3189: if a user accidentally sets
+    ``stream_chunk_timeout`` on a non-OpenAI provider, the factory must drop
+    the kwarg before forwarding it to the model constructor. Otherwise the
+    third-party client raises ``TypeError: unexpected keyword argument
+    'stream_chunk_timeout'`` because the parameter is specific to
+    ``langchain_openai:ChatOpenAI``.
+    """
+    model = ModelConfig(
+        name="anthropic-with-stray-timeout",
+        display_name="Anthropic With Stray Timeout",
+        description=None,
+        use="langchain_anthropic:ChatAnthropic",
+        model="claude-sonnet-4",
+        stream_chunk_timeout=60.0,  # user-set on a non-OpenAI provider — must be dropped
+    )
+    cfg = _make_app_config([model])
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+    factory_module.create_chat_model(name="anthropic-with-stray-timeout")
+
+    assert "stream_chunk_timeout" not in captured

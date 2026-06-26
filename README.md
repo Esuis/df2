@@ -53,6 +53,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
   - [Quick Start](#quick-start)
     - [Configuration](#configuration)
     - [Running the Application](#running-the-application)
+      - [Deployment Sizing](#deployment-sizing)
       - [Option 1: Docker (Recommended)](#option-1-docker-recommended)
       - [Option 2: Local Development](#option-2-local-development)
     - [Advanced](#advanced)
@@ -103,35 +104,38 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
    cd deer-flow
    ```
 
-2. **Generate local configuration files**
+2. **Run the setup wizard**
 
    From the project root directory (`deer-flow/`), run:
 
    ```bash
-   make config
+   make setup
    ```
 
-   This command creates local configuration files based on the provided example templates.
+   This launches an interactive wizard that guides you through choosing an LLM provider, optional web search, and execution/safety preferences such as sandbox mode, bash access, and file-write tools. It generates a minimal `config.yaml` and writes your keys to `.env`. Takes about 2 minutes.
 
-3. **Configure your preferred model(s)**
+   The wizard also lets you configure an optional web search provider, or skip it for now.
 
-   Edit `config.yaml` and define at least one model:
+   Run `make doctor` at any time to verify your setup and get actionable fix hints.
+
+   > **Advanced / manual configuration**: If you prefer to edit `config.yaml` directly, run `make config` instead to copy the full template. See `config.example.yaml` for the complete reference including CLI-backed providers (Codex CLI, Claude Code OAuth), OpenRouter, Responses API, and more.
+
+   <details>
+   <summary>Manual model configuration examples</summary>
 
    ```yaml
    models:
-     - name: gpt-4                       # Internal identifier
-       display_name: GPT-4               # Human-readable name
-       use: langchain_openai:ChatOpenAI  # LangChain class path
-       model: gpt-4                      # Model identifier for API
-       api_key: $OPENAI_API_KEY          # API key (recommended: use env var)
-       max_tokens: 4096                  # Maximum tokens per request
-       temperature: 0.7                  # Sampling temperature
+     - name: gpt-4o
+       display_name: GPT-4o
+       use: langchain_openai:ChatOpenAI
+       model: gpt-4o
+       api_key: $OPENAI_API_KEY
 
      - name: openrouter-gemini-2.5-flash
        display_name: Gemini 2.5 Flash (OpenRouter)
        use: langchain_openai:ChatOpenAI
        model: google/gemini-2.5-flash-preview
-       api_key: $OPENAI_API_KEY          # OpenRouter still uses the OpenAI-compatible field name here
+       api_key: $OPENROUTER_API_KEY
        base_url: https://openrouter.ai/api/v1
 
      - name: gpt-5-responses
@@ -181,49 +185,38 @@ That prompt is intended for coding agents. It tells the agent to clone the repo 
    ```
 
    - Codex CLI reads `~/.codex/auth.json`
-   - The Codex Responses endpoint currently rejects `max_tokens` and `max_output_tokens`, so `CodexChatModel` does not expose a request-level token cap
-   - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_CREDENTIALS_PATH`, or plaintext `~/.claude/.credentials.json`
-   - ACP agent entries are separate from model providers. If you configure `acp_agents.codex`, point it at a Codex ACP adapter such as `npx -y @zed-industries/codex-acp`; the standard `codex` CLI binary is not ACP-compatible by itself
-   - On macOS, DeerFlow does not probe Keychain automatically. Export Claude Code auth explicitly if needed:
+   - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH`, or `~/.claude/.credentials.json`
+   - ACP agent entries are separate from model providers — if you configure `acp_agents.codex`, point it at a Codex ACP adapter such as `npx -y @zed-industries/codex-acp`
+   - On macOS, export Claude Code auth explicitly if needed:
 
    ```bash
    eval "$(python3 scripts/export_claude_code_oauth.py --print-export)"
    ```
-   
-4. **Set API keys for your configured model(s)**
 
-   Choose one of the following methods:
-
-- Option A: Edit the `.env` file in the project root (Recommended)
-
+   API keys can also be set manually in `.env` (recommended) or exported in your shell:
 
    ```bash
-   TAVILY_API_KEY=your-tavily-api-key
    OPENAI_API_KEY=your-openai-api-key
-   # OpenRouter also uses OPENAI_API_KEY when your config uses langchain_openai:ChatOpenAI + base_url.
-   # Add other provider keys as needed
-   INFOQUEST_API_KEY=your-infoquest-api-key
+   TAVILY_API_KEY=your-tavily-api-key
    ```
 
-- Option B: Export environment variables in your shell
-
-   ```bash
-   export OPENAI_API_KEY=your-openai-api-key
-   ```
-
-   For CLI-backed providers:
-   - Codex CLI: `~/.codex/auth.json`
-   - Claude Code OAuth: explicit env/file handoff or `~/.claude/.credentials.json`
-
-- Option C: Edit `config.yaml` directly (Not recommended for production)
-
-   ```yaml
-   models:
-     - name: gpt-4
-       api_key: your-actual-api-key-here  # Replace placeholder
-   ```
+   </details>
 
 ### Running the Application
+
+#### Deployment Sizing
+
+Use the table below as a practical starting point when choosing how to run DeerFlow:
+
+| Deployment target | Starting point | Recommended | Notes |
+|---------|-----------|------------|-------|
+| Local evaluation / `make dev` | 4 vCPU, 8 GB RAM, 20 GB free SSD | 8 vCPU, 16 GB RAM | Good for one developer or one light session with hosted model APIs. `2 vCPU / 4 GB` is usually not enough. |
+| Docker development / `make docker-start` | 4 vCPU, 8 GB RAM, 25 GB free SSD | 8 vCPU, 16 GB RAM | Image builds, bind mounts, and sandbox containers need more headroom than pure local dev. |
+| Long-running server / `make up` | 8 vCPU, 16 GB RAM, 40 GB free SSD | 16 vCPU, 32 GB RAM | Preferred for shared use, multi-agent runs, report generation, or heavier sandbox workloads. |
+
+- These numbers cover DeerFlow itself. If you also host a local LLM, size that service separately.
+- Linux plus Docker is the recommended deployment target for a persistent server. macOS and Windows are best treated as development or evaluation environments.
+- If CPU or memory usage stays pinned, reduce concurrent runs first, then move to the next sizing tier.
 
 #### Option 1: Docker (Recommended)
 
@@ -250,10 +243,12 @@ make up     # Build images and start all production services
 make down   # Stop and remove containers
 ```
 
-> [!NOTE]
-> The LangGraph agent server currently runs via `langgraph dev` (the open-source CLI server).
-
 Access: http://localhost:2026
+
+The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
+
+> [!IMPORTANT]
+> The Gateway holds run state (RunManager and the stream bridge) in process, so production defaults to a single Gateway worker (`GATEWAY_WORKERS=1`). Raising the worker count without a shared cross-worker stream bridge — which is not yet available — breaks run cancellation, SSE reconnects, request de-duplication, and IM channels, because nginx uses no sticky sessions and each worker keeps its own run state. Scale a single worker up with more CPU/RAM (or move the database and sandbox onto dedicated tiers) instead of raising `GATEWAY_WORKERS`.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
@@ -261,7 +256,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
 If you prefer running services locally:
 
-Prerequisite: complete the "Configuration" steps above first (`make config` and model API keys). `make dev` requires a valid configuration file (defaults to `config.yaml` in the project root; can be overridden via `DEER_FLOW_CONFIG_PATH`).
+Prerequisite: complete the "Configuration" steps above first (`make setup`). `make dev` requires a valid `config.yaml` in the project root. Set `DEER_FLOW_PROJECT_ROOT` to define that root explicitly, or `DEER_FLOW_CONFIG_PATH` to point at a specific config file. Runtime state defaults to `.deer-flow` under the project root and can be moved with `DEER_FLOW_HOME`; skills default to `skills/` under the project root and can be moved with `DEER_FLOW_SKILLS_PATH`. Run `make doctor` to verify your setup before starting.
 On Windows, run the local development flow from Git Bash. Native `cmd.exe` and PowerShell shells are not supported for the bash-based service scripts, and WSL is not guaranteed because some scripts rely on Git for Windows utilities such as `cygpath`.
 
 1. **Check prerequisites**:
@@ -271,7 +266,7 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
 
 2. **Install dependencies**:
    ```bash
-   make install  # Install backend + frontend dependencies
+   make install  # Install backend + frontend dependencies + pre-commit hooks
    ```
 
 3. **(Optional) Pre-pull sandbox image**:
@@ -296,53 +291,31 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
 
 #### Startup Modes
 
-DeerFlow supports multiple startup modes across two dimensions:
-
-- **Dev / Prod** — dev enables hot-reload; prod uses pre-built frontend
-- **Standard / Gateway** — standard uses a separate LangGraph server (4 processes); Gateway mode (experimental) embeds the agent runtime in the Gateway API (3 processes)
+DeerFlow runs the agent runtime inside the Gateway API. Development mode enables hot-reload; production mode uses a pre-built frontend.
 
 | | **Local Foreground** | **Local Daemon** | **Docker Dev** | **Docker Prod** |
 |---|---|---|---|---|
 | **Dev** | `./scripts/serve.sh --dev`<br/>`make dev` | `./scripts/serve.sh --dev --daemon`<br/>`make dev-daemon` | `./scripts/docker.sh start`<br/>`make docker-start` | — |
-| **Dev + Gateway** | `./scripts/serve.sh --dev --gateway`<br/>`make dev-pro` | `./scripts/serve.sh --dev --gateway --daemon`<br/>`make dev-daemon-pro` | `./scripts/docker.sh start --gateway`<br/>`make docker-start-pro` | — |
 | **Prod** | `./scripts/serve.sh --prod`<br/>`make start` | `./scripts/serve.sh --prod --daemon`<br/>`make start-daemon` | — | `./scripts/deploy.sh`<br/>`make up` |
-| **Prod + Gateway** | `./scripts/serve.sh --prod --gateway`<br/>`make start-pro` | `./scripts/serve.sh --prod --gateway --daemon`<br/>`make start-daemon-pro` | — | `./scripts/deploy.sh --gateway`<br/>`make up-pro` |
 
 | Action | Local | Docker Dev | Docker Prod |
 |---|---|---|---|
 | **Stop** | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |
 | **Restart** | `./scripts/serve.sh --restart [flags]` | `./scripts/docker.sh restart` | — |
 
-> **Gateway mode** eliminates the LangGraph server process — the Gateway API handles agent execution directly via async tasks, managing its own concurrency.
-
-#### Why Gateway Mode?
-
-In standard mode, DeerFlow runs a dedicated [LangGraph Platform](https://langchain-ai.github.io/langgraph/) server alongside the Gateway API. This architecture works well but has trade-offs:
-
-| | Standard Mode | Gateway Mode |
-|---|---|---|
-| **Architecture** | Gateway (REST API) + LangGraph (agent runtime) | Gateway embeds agent runtime |
-| **Concurrency** | `--n-jobs-per-worker` per worker (requires license) | `--workers` × async tasks (no per-worker cap) |
-| **Containers / Processes** | 4 (frontend, gateway, langgraph, nginx) | 3 (frontend, gateway, nginx) |
-| **Resource usage** | Higher (two Python runtimes) | Lower (single Python runtime) |
-| **LangGraph Platform license** | Required for production images | Not required |
-| **Cold start** | Slower (two services to initialize) | Faster |
-
-Both modes are functionally equivalent — the same agents, tools, and skills work in either mode.
+Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
 
 #### Docker Production Deployment
 
-`deploy.sh` supports building and starting separately. Images are mode-agnostic — runtime mode is selected at start time:
+`deploy.sh` supports building and starting separately:
 
 ```bash
 # One-step (build + start)
-deploy.sh                    # standard mode (default)
-deploy.sh --gateway          # gateway mode
+deploy.sh
 
-# Two-step (build once, start with any mode)
+# Two-step (build once, start later)
 deploy.sh build              # build all images
-deploy.sh start              # start in standard mode
-deploy.sh start --gateway    # start in gateway mode
+deploy.sh start              # start pre-built images
 
 # Stop
 deploy.sh down
@@ -370,19 +343,23 @@ See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 
+DeerFlow can also expose user-owned IM channel connections in the workspace UI. When `channel_connections` is enabled, logged-in users can bind Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, or WeCom from the sidebar / Settings > Channels. It reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. Incoming IM messages then run under the connected DeerFlow user account. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and security notes.
+
 | Channel | Transport | Difficulty |
 |---------|-----------|------------|
 | Telegram | Bot API (long-polling) | Easy |
 | Slack | Socket Mode | Moderate |
 | Feishu / Lark | WebSocket | Moderate |
+| WeChat | Tencent iLink (long-polling) | Moderate |
 | WeCom | WebSocket | Moderate |
+| DingTalk | Stream Push (WebSocket) | Moderate |
 
 **Configuration in `config.yaml`:**
 
 ```yaml
 channels:
-  # LangGraph Server URL (default: http://localhost:2024)
-  langgraph_url: http://localhost:2024
+  # LangGraph-compatible Gateway API base URL (default: http://localhost:8001/api)
+  langgraph_url: http://localhost:8001/api
   # Gateway API URL (default: http://localhost:8001)
   gateway_url: http://localhost:8001
 
@@ -419,6 +396,19 @@ channels:
     bot_token: $TELEGRAM_BOT_TOKEN
     allowed_users: []               # empty = allow all
 
+  wechat:
+    enabled: false
+    bot_token: $WECHAT_BOT_TOKEN
+    ilink_bot_id: $WECHAT_ILINK_BOT_ID
+    qrcode_login_enabled: true      # optional: allow first-time QR bootstrap when bot_token is absent
+    allowed_users: []               # empty = allow all
+    polling_timeout: 35
+    state_dir: ./.deer-flow/wechat/state
+    max_inbound_image_bytes: 20971520
+    max_outbound_image_bytes: 20971520
+    max_inbound_file_bytes: 52428800
+    max_outbound_file_bytes: 52428800
+
     # Optional: per-channel / per-user session settings
     session:
       assistant_id: mobile-agent  # custom agent names are also supported here
@@ -432,11 +422,19 @@ channels:
           context:
             thinking_enabled: true
             subagent_enabled: true
+
+  dingtalk:
+    enabled: true
+    client_id: $DINGTALK_CLIENT_ID             # Client ID of your DingTalk application
+    client_secret: $DINGTALK_CLIENT_SECRET     # Client Secret of your DingTalk application
+    allowed_users: []                          # empty = allow all
+    card_template_id: ""                       # Optional: AI Card template ID for streaming typewriter effect
 ```
 
 Notes:
 - `assistant_id: lead_agent` calls the default LangGraph assistant directly.
 - If `assistant_id` is set to a custom agent name, DeerFlow still routes through `lead_agent` and injects that value as `agent_name`, so the custom agent's SOUL/config takes effect for IM channels.
+- IM channel workers call Gateway's LangGraph-compatible API internally and automatically attach process-local internal auth plus the CSRF cookie/header pair required for thread and run creation.
 
 Set the corresponding API keys in your `.env` file:
 
@@ -452,9 +450,17 @@ SLACK_APP_TOKEN=xapp-...
 FEISHU_APP_ID=cli_xxxx
 FEISHU_APP_SECRET=your_app_secret
 
+# WeChat iLink
+WECHAT_BOT_TOKEN=your_ilink_bot_token
+WECHAT_ILINK_BOT_ID=your_ilink_bot_id
+
 # WeCom
 WECOM_BOT_ID=your_bot_id
 WECOM_BOT_SECRET=your_bot_secret
+
+# DingTalk
+DINGTALK_CLIENT_ID=your_client_id
+DINGTALK_CLIENT_SECRET=your_client_secret
 ```
 
 **Telegram Setup**
@@ -477,6 +483,14 @@ WECOM_BOT_SECRET=your_bot_secret
 3. Under **Events**, subscribe to `im.message.receive_v1` and select **Long Connection** mode.
 4. Copy the App ID and App Secret. Set `FEISHU_APP_ID` and `FEISHU_APP_SECRET` in `.env` and enable the channel in `config.yaml`.
 
+**WeChat Setup**
+
+1. Enable the `wechat` channel in `config.yaml`.
+2. Either set `WECHAT_BOT_TOKEN` in `.env`, or set `qrcode_login_enabled: true` for first-time QR bootstrap.
+3. When `bot_token` is absent and QR bootstrap is enabled, watch backend logs for the QR content returned by iLink and complete the binding flow.
+4. After the QR flow succeeds, DeerFlow persists the acquired token under `state_dir` for later restarts.
+5. For Docker Compose deployments, keep `state_dir` on a persistent volume so the `get_updates_buf` cursor and saved auth state survive restarts.
+
 **WeCom Setup**
 
 1. Create a bot on the WeCom AI Bot platform and obtain the `bot_id` and `bot_secret`.
@@ -485,7 +499,15 @@ WECOM_BOT_SECRET=your_bot_secret
 4. Make sure backend dependencies include `wecom-aibot-python-sdk`. The channel uses a WebSocket long connection and does not require a public callback URL.
 5. The current integration supports inbound text, image, and file messages. Final images/files generated by the agent are also sent back to the WeCom conversation.
 
-When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` container. In that case, do not point `channels.langgraph_url` or `channels.gateway_url` at `localhost`; use container service names such as `http://langgraph:2024` and `http://gateway:8001`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` and `DEER_FLOW_CHANNELS_GATEWAY_URL`.
+**DingTalk Setup**
+
+1. Create a DingTalk application in the [DingTalk Developer Console](https://open.dingtalk.com/) and enable **Robot** capability.
+2. Set the message receiving mode to **Stream Mode** in the robot configuration page.
+3. Copy the `Client ID` and `Client Secret`, set `DINGTALK_CLIENT_ID` and `DINGTALK_CLIENT_SECRET` in `.env`, and enable the channel in `config.yaml`.
+4. *(Optional)* To enable streaming AI Card replies (typewriter effect), create an **AI Card** template on the [DingTalk Card Platform](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card), then set `card_template_id` in `config.yaml` to the template ID. You also need to apply for the `Card.Streaming.Write` and `Card.Instance.Write` permissions.
+
+
+When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` container. In that case, do not point `channels.langgraph_url` or `channels.gateway_url` at `localhost`; use container service names such as `http://gateway:8001/api` and `http://gateway:8001`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` and `DEER_FLOW_CHANNELS_GATEWAY_URL`.
 
 **Commands**
 
@@ -529,6 +551,15 @@ LANGFUSE_BASE_URL=https://cloud.langfuse.com
 
 If you are using a self-hosted Langfuse instance, set `LANGFUSE_BASE_URL` to your deployment URL.
 
+**Trace correlation fields.** Every agent run is annotated with Langfuse's reserved trace attributes so the Sessions and Users pages light up automatically:
+
+- `session_id` = LangGraph `thread_id` — groups every trace of the same conversation
+- `user_id` = effective user from `get_effective_user_id()` (falls back to `default` in no-auth mode)
+- `trace_name` = assistant id (defaults to `lead-agent`)
+- `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]` (omitted when not set)
+
+These are injected into `RunnableConfig.metadata` at the graph invocation root for both the gateway path (`runtime/runs/worker.py::run_agent`) and the embedded path (`client.py::DeerFlowClient.stream`), so any LangChain-compatible callback can read them. Set `DEER_FLOW_ENV` (or `ENVIRONMENT`) to tag traces by deployment environment.
+
 #### Using Both Providers
 
 If both LangSmith and Langfuse are enabled, DeerFlow attaches both tracing callbacks and reports the same model activity to both systems.
@@ -558,6 +589,8 @@ Skills are what make DeerFlow do *almost anything*.
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
 
 Skills are loaded progressively — only when the task needs them, not all at once. This keeps the context window lean and makes DeerFlow work well even with token-sensitive models.
+
+Users can explicitly activate an enabled skill for a single turn by starting the request with `/skill-name`, for example `/data-analysis analyze uploads/foo.csv`. DeerFlow loads that skill's `SKILL.md` as hidden current-turn context while leaving the base prompt limited to skill metadata. Slash activation respects disabled skills, custom-agent skill whitelists, and existing channel commands such as `/new` and `/help`.
 
 When you install `.skill` archives through the Gateway, DeerFlow accepts standard optional frontmatter metadata such as `version`, `author`, and `compatibility` instead of rejecting otherwise valid external skills.
 
@@ -611,7 +644,7 @@ See [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerfl
 
 Complex tasks rarely fit in a single pass. DeerFlow decomposes them.
 
-The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions. Sub-agents run in parallel when possible, report back structured results, and the lead agent synthesizes everything into a coherent output.
+The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions. Sub-agents run in parallel when possible, report back structured results, and the lead agent synthesizes everything into a coherent output. When token usage tracking is enabled, completed sub-agent usage is attributed back to the dispatching step.
 
 This is how DeerFlow handles tasks that take minutes to hours: a research task might fan out into a dozen sub-agents, each exploring a different angle, then converge into a single report — or a website — or a slide deck with generated visuals. One harness, many hands.
 
@@ -638,6 +671,8 @@ This is the difference between a chatbot with tool access and an agent with an a
 **Isolated Sub-Agent Context**: Each sub-agent runs in its own isolated context. This means that the sub-agent will not be able to see the context of the main agent or other sub-agents. This is important to ensure that the sub-agent is able to focus on the task at hand and not be distracted by the context of the main agent or other sub-agents.
 
 **Summarization**: Within a session, DeerFlow manages context aggressively — summarizing completed sub-tasks, offloading intermediate results to the filesystem, compressing what's no longer immediately relevant. This lets it stay sharp across long, multi-step tasks without blowing the context window.
+
+**Strict Tool-Call Recovery**: When a provider or middleware interrupts a tool-call loop, DeerFlow now strips provider-level raw tool-call metadata on forced-stop assistant messages and injects placeholder tool results for dangling calls before the next model invocation. This keeps OpenAI-compatible reasoning models that strictly validate `tool_call_id` sequences from failing with malformed history errors.
 
 ### Long-Term Memory
 
@@ -712,6 +747,12 @@ DeerFlow has key high-privilege capabilities including **system command executio
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and guidelines.
 
 Regression coverage includes Docker sandbox mode detection and provisioner kubeconfig-path handling tests in `backend/tests/`.
+Backend blocking-IO diagnostics are available from the repository root with
+`make detect-blocking-io`: it statically scans backend business code for
+blocking IO that may run on the backend event loop, prints a concise summary,
+and writes complete JSON findings to `.deer-flow/blocking-io-findings.json`.
+The JSON includes compact review records with `priority`, `location`,
+`blocking_call`, `event_loop_exposure`, `reason`, and `code`.
 Gateway artifact serving now forces active web content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) to download as attachments instead of inline rendering, reducing XSS risk for generated artifacts.
 
 ## License

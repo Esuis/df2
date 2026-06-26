@@ -10,8 +10,9 @@ on all assistant messages when thinking mode is enabled.
 from typing import Any
 
 from langchain_core.language_models import LanguageModelInput
-from langchain_core.messages import AIMessage
 from langchain_deepseek import ChatDeepSeek
+
+from deerflow.models.assistant_payload_replay import restore_assistant_payloads, restore_reasoning_content
 
 
 class PatchedChatDeepSeek(ChatDeepSeek):
@@ -22,6 +23,14 @@ class PatchedChatDeepSeek(ChatDeepSeek):
     version ensures reasoning_content from additional_kwargs is included in the
     request payload.
     """
+
+    @classmethod
+    def is_lc_serializable(cls) -> bool:
+        return True
+
+    @property
+    def lc_secrets(self) -> dict[str, str]:
+        return {"api_key": "DEEPSEEK_API_KEY", "openai_api_key": "DEEPSEEK_API_KEY"}
 
     def _get_request_payload(
         self,
@@ -41,25 +50,10 @@ class PatchedChatDeepSeek(ChatDeepSeek):
         # Call parent to get the base payload
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
 
-        # Match payload messages with original messages to restore reasoning_content
-        payload_messages = payload.get("messages", [])
-
-        # The payload messages and original messages should be in the same order
-        # Iterate through both and match by position
-        if len(payload_messages) == len(original_messages):
-            for payload_msg, orig_msg in zip(payload_messages, original_messages):
-                if payload_msg.get("role") == "assistant" and isinstance(orig_msg, AIMessage):
-                    reasoning_content = orig_msg.additional_kwargs.get("reasoning_content")
-                    if reasoning_content is not None:
-                        payload_msg["reasoning_content"] = reasoning_content
-        else:
-            # Fallback: match by counting assistant messages
-            ai_messages = [m for m in original_messages if isinstance(m, AIMessage)]
-            assistant_payloads = [(i, m) for i, m in enumerate(payload_messages) if m.get("role") == "assistant"]
-
-            for (idx, payload_msg), ai_msg in zip(assistant_payloads, ai_messages):
-                reasoning_content = ai_msg.additional_kwargs.get("reasoning_content")
-                if reasoning_content is not None:
-                    payload_messages[idx]["reasoning_content"] = reasoning_content
+        restore_assistant_payloads(
+            payload.get("messages", []),
+            original_messages,
+            restore_reasoning_content,
+        )
 
         return payload

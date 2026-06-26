@@ -29,6 +29,7 @@ export const zhCN: Translations = {
     close: "关闭",
     more: "更多",
     search: "搜索",
+    loadMore: "加载更多",
     download: "下载",
     thinking: "思考",
     artifacts: "文件",
@@ -49,6 +50,7 @@ export const zhCN: Translations = {
     exportAsMarkdown: "导出为 Markdown",
     exportAsJSON: "导出为 JSON",
     exportSuccess: "对话已导出",
+    regenerate: "重新生成",
   },
 
   // Home
@@ -163,6 +165,7 @@ export const zhCN: Translations = {
   sidebar: {
     newChat: "新对话",
     chats: "对话",
+    channels: "渠道",
     recentChats: "最近的对话",
     demoChats: "演示对话",
     agents: "智能体",
@@ -191,8 +194,11 @@ export const zhCN: Translations = {
     nameStepAlreadyExistsError: "已存在同名智能体",
     nameStepNetworkError: "网络请求失败，请检查网络或后端连接",
     nameStepCheckError: "无法验证名称可用性，请稍后重试",
+    nameStepCheckErrorWithDetail: "名称校验失败：{detail}",
+    nameStepApiDisabledError:
+      "服务器未开启自定义智能体管理功能，请联系管理员。",
     nameStepBootstrapMessage:
-      "新智能体的名称是 {name}，现在开始为它生成 **SOUL**。",
+      "新智能体的名称是 {name}。请先帮我设计它的用途、行为方式和 SOUL.md，再保存它。",
     save: "保存智能体",
     saving: "正在保存智能体...",
     saveRequested:
@@ -224,6 +230,9 @@ export const zhCN: Translations = {
     reportIssue: "报告问题",
     contactUs: "联系我们",
     about: "关于 DeerFlow",
+    logout: "退出登录",
+    gatewayUnavailable: "网关暂时不可用。",
+    gatewayUnavailableRetrying: "正在后台重试…",
   },
 
   // Conversation
@@ -235,6 +244,42 @@ export const zhCN: Translations = {
   // Chats
   chats: {
     searchChats: "搜索对话",
+    loadMoreToSearch: "加载更多以搜索更早的对话",
+    loadingMore: "正在加载...",
+    loadOlderChats: "加载更早的对话",
+  },
+
+  // Channels
+  channels: {
+    title: "渠道",
+    connect: "连接",
+    modify: "修改",
+    reconnect: "重新连接",
+    disconnect: "断开连接",
+    connected: "已连接",
+    notConnected: "未连接",
+    pending: "待完成",
+    revoked: "已断开",
+    disabled: "已停用",
+    unconfigured: "未配置",
+    unavailable: "当前无法使用渠道连接。",
+    unavailableShort: "不可用",
+    setupTitle: (name: string) => `连接 ${name}`,
+    setupEditTitle: (name: string) => `修改 ${name}`,
+    setupDescription:
+      "填写当前服务进程需要的配置值。这些内容不会写入 config.yaml。",
+    saveAndConnect: "保存并连接",
+    saveChanges: "保存修改",
+    descriptions: {
+      telegram: "通过 DeerFlow Bot 接收 Telegram 私聊消息。",
+      slack: "接收 Slack 工作区消息和提及。",
+      discord: "通过 DeerFlow Bot 接收 Discord 服务器消息。",
+      feishu: "通过 DeerFlow 应用接收飞书和 Lark 消息。",
+      dingtalk: "通过 DeerFlow Bot 接收钉钉 Stream Push 消息。",
+      wechat: "通过 DeerFlow Bot 接收微信 iLink 消息。",
+      wecom: "通过 DeerFlow AI Bot 接收企业微信消息。",
+    },
+    connectedAs: (name: string) => `已连接为 ${name}。`,
   },
 
   // Page titles (document title)
@@ -284,9 +329,35 @@ export const zhCN: Translations = {
   // Token Usage
   tokenUsage: {
     title: "Token 用量",
+    label: "Tokens",
     input: "输入",
     output: "输出",
     total: "总计",
+    view: "显示方式",
+    unavailable:
+      "暂无 Token 用量。只有模型成功返回且供应商提供 usage_metadata 时才会显示。",
+    unavailableShort: "未返回用量",
+    note: "顶部总量优先使用后端持久化的线程用量；当当前回复仍在流式返回时，还会叠加可见的进行中用量。每轮和调试用量只来自当前可见消息，可能与平台账单页不完全一致。",
+    presets: {
+      off: "关闭",
+      summary: "总览",
+      perTurn: "每轮",
+      debug: "调试",
+    },
+    presetDescriptions: {
+      off: "隐藏顶部和会话内的 token 展示。",
+      summary: "只在顶部显示当前对话累计 token。",
+      perTurn: "显示顶部累计，并为每轮 assistant 回复显示一条汇总 token。",
+      debug: "显示顶部累计，并展示按步骤归类的 token 调试信息。",
+    },
+    finalAnswer: "最终回复",
+    stepTotal: "步骤总计",
+    sharedAttribution: "该 token 由此步骤中的多个动作共同消耗",
+    subagent: (description: string) => `子任务：${description}`,
+    startTodo: (content: string) => `开始 To-do：${content}`,
+    completeTodo: (content: string) => `完成 To-do：${content}`,
+    updateTodo: (content: string) => `更新 To-do：${content}`,
+    removeTodo: (content: string) => `移除 To-do：${content}`,
   },
 
   // Shortcuts
@@ -305,7 +376,9 @@ export const zhCN: Translations = {
     title: "设置",
     description: "根据你的偏好调整 DeerFlow 的界面和行为。",
     sections: {
+      account: "账号",
       appearance: "外观",
+      channels: "渠道",
       memory: "记忆",
       tools: "工具",
       skills: "技能",
@@ -404,6 +477,14 @@ export const zhCN: Translations = {
     tools: {
       title: "工具",
       description: "管理 MCP 工具的配置和启用状态。",
+      adminRequired: "需要管理员权限才能管理 MCP 工具。",
+      empty: "暂无 MCP 工具。",
+    },
+    channels: {
+      title: "渠道",
+      description: "连接可在浏览器外向 DeerFlow 发送消息的即时通讯账号。",
+      disabled:
+        "当前服务器未启用渠道连接。请联系管理员开启 channel_connections。",
     },
     skills: {
       title: "技能",
@@ -427,9 +508,56 @@ export const zhCN: Translations = {
       notSupported: "当前浏览器不支持通知功能。",
       disableNotification: "关闭通知",
     },
+    account: {
+      profileTitle: "个人信息",
+      email: "邮箱",
+      role: "角色",
+      ssoProvider: "SSO",
+      changePasswordTitle: "修改密码",
+      changePasswordDescription: "更新你的账号密码。",
+      ssoPasswordDescription: "密码由你的 SSO 提供商管理。",
+      ssoPasswordMessage:
+        "此账号通过 {provider} 登录，DeerFlow 无法在此管理或修改密码。请前往你的 SSO 提供商账号设置中进行操作。",
+      currentPassword: "当前密码",
+      newPassword: "新密码",
+      confirmNewPassword: "确认新密码",
+      passwordMismatch: "两次输入的新密码不一致",
+      passwordTooShort: "密码长度至少为 8 个字符",
+      passwordChangedSuccess: "密码修改成功",
+      networkError: "网络错误，请重试。",
+      updating: "更新中...",
+      updatePassword: "修改密码",
+      signOut: "退出登录",
+    },
     acknowledge: {
       emptyTitle: "致谢",
       emptyDescription: "相关的致谢信息会展示在这里。",
+    },
+  },
+  login: {
+    signInTitle: "登录你的账号",
+    createAccountTitle: "创建新账号",
+    email: "邮箱",
+    emailPlaceholder: "you@example.com",
+    password: "密码",
+    passwordPlaceholder: "•••••••",
+    pleaseWait: "请稍候...",
+    signIn: "登录",
+    createAccount: "创建账号",
+    orContinueWith: "或使用以下方式登录",
+    ssoHint: "如果你的账号使用单点登录（SSO），请改用下方的选项登录。",
+    continueWith: (provider: string) => `使用 ${provider} 登录`,
+    noAccountSignUp: "还没有账号？立即注册",
+    haveAccountSignIn: "已有账号？立即登录",
+    backToHome: "← 返回首页",
+    networkError: "网络错误，请重试。",
+    authFailed: "身份验证失败。",
+    errors: {
+      sso_failed: "SSO 登录失败，请重试或使用邮箱登录。",
+      sso_cancelled: "SSO 登录已取消。",
+      sso_account_exists:
+        "该邮箱对应的账号已存在。请使用密码登录或联系管理员。",
+      sso_not_allowed: "你的账号不允许使用 SSO 登录。请联系管理员。",
     },
   },
 };

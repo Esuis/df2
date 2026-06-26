@@ -29,6 +29,7 @@ export const enUS: Translations = {
     close: "Close",
     more: "More",
     search: "Search",
+    loadMore: "Load more",
     download: "Download",
     thinking: "Thinking",
     artifacts: "Artifacts",
@@ -49,6 +50,7 @@ export const enUS: Translations = {
     exportAsMarkdown: "Export as Markdown",
     exportAsJSON: "Export as JSON",
     exportSuccess: "Conversation exported",
+    regenerate: "Regenerate",
   },
 
   // Home
@@ -169,6 +171,7 @@ export const enUS: Translations = {
   sidebar: {
     newChat: "New chat",
     chats: "Chats",
+    channels: "Channels",
     recentChats: "Recent chats",
     demoChats: "Demo chats",
     agents: "Agents",
@@ -203,8 +206,11 @@ export const enUS: Translations = {
     nameStepNetworkError:
       "Network request failed — check your network or backend connection",
     nameStepCheckError: "Could not verify name availability — please try again",
+    nameStepCheckErrorWithDetail: "Name check failed: {detail}",
+    nameStepApiDisabledError:
+      "Custom agent management is not enabled on this server. Please contact your administrator.",
     nameStepBootstrapMessage:
-      "The new custom agent name is {name}. Let's bootstrap it's **SOUL**.",
+      "The new custom agent name is {name}. Help me design its purpose, behavior, and SOUL.md before saving it.",
     save: "Save agent",
     saving: "Saving agent...",
     saveRequested:
@@ -236,6 +242,9 @@ export const enUS: Translations = {
     reportIssue: "Report a issue",
     contactUs: "Contact us",
     about: "About DeerFlow",
+    logout: "Log out",
+    gatewayUnavailable: "Gateway is temporarily unavailable.",
+    gatewayUnavailableRetrying: "Retrying in the background…",
   },
 
   // Conversation
@@ -247,6 +256,42 @@ export const enUS: Translations = {
   // Chats
   chats: {
     searchChats: "Search chats",
+    loadMoreToSearch: "Load more to search older conversations",
+    loadingMore: "Loading more...",
+    loadOlderChats: "Load older chats",
+  },
+
+  // Channels
+  channels: {
+    title: "Channels",
+    connect: "Connect",
+    modify: "Modify",
+    reconnect: "Reconnect",
+    disconnect: "Disconnect",
+    connected: "Connected",
+    notConnected: "Not connected",
+    pending: "Pending",
+    revoked: "Disconnected",
+    disabled: "Disabled",
+    unconfigured: "Not configured",
+    unavailable: "Channel connections are unavailable right now.",
+    unavailableShort: "Unavailable",
+    setupTitle: (name: string) => `Connect ${name}`,
+    setupEditTitle: (name: string) => `Modify ${name}`,
+    setupDescription:
+      "Enter the values needed by this server process. They are not written to config.yaml.",
+    saveAndConnect: "Save and connect",
+    saveChanges: "Save changes",
+    descriptions: {
+      telegram: "Telegram direct messages through your DeerFlow bot.",
+      slack: "Slack workspace messages and mentions.",
+      discord: "Discord server messages through your DeerFlow bot.",
+      feishu: "Feishu and Lark messages through your DeerFlow app.",
+      dingtalk: "DingTalk Stream Push messages through your DeerFlow bot.",
+      wechat: "WeChat iLink messages through your DeerFlow bot.",
+      wecom: "WeCom messages through your DeerFlow AI bot.",
+    },
+    connectedAs: (name: string) => `Connected as ${name}.`,
   },
 
   // Page titles (document title)
@@ -298,9 +343,36 @@ export const enUS: Translations = {
   // Token Usage
   tokenUsage: {
     title: "Token Usage",
+    label: "Tokens",
     input: "Input",
     output: "Output",
     total: "Total",
+    view: "Display",
+    unavailable:
+      "No token usage yet. Usage appears only after a successful model response when the provider returns usage_metadata.",
+    unavailableShort: "No usage returned",
+    note: "Header totals use persisted thread usage, plus visible in-flight usage while a run is still streaming. Per-turn and debug usage come from currently visible messages only. Totals may differ from provider billing pages.",
+    presets: {
+      off: "Off",
+      summary: "Summary",
+      perTurn: "Per turn",
+      debug: "Debug",
+    },
+    presetDescriptions: {
+      off: "Hide token usage in the header and conversation.",
+      summary: "Show only the current conversation total in the header.",
+      perTurn:
+        "Show the header total and one token summary per assistant turn.",
+      debug: "Show the header total and step-level token debugging details.",
+    },
+    finalAnswer: "Final answer",
+    stepTotal: "Step total",
+    sharedAttribution: "Shared across multiple actions in this step",
+    subagent: (description: string) => `Subagent: ${description}`,
+    startTodo: (content: string) => `Start To-do: ${content}`,
+    completeTodo: (content: string) => `Complete To-do: ${content}`,
+    updateTodo: (content: string) => `Update To-do: ${content}`,
+    removeTodo: (content: string) => `Remove To-do: ${content}`,
   },
 
   // Shortcuts
@@ -320,7 +392,9 @@ export const enUS: Translations = {
     title: "Settings",
     description: "Adjust how DeerFlow looks and behaves for you.",
     sections: {
+      account: "Account",
       appearance: "Appearance",
+      channels: "Channels",
       memory: "Memory",
       tools: "Tools",
       skills: "Skills",
@@ -422,6 +496,15 @@ export const enUS: Translations = {
     tools: {
       title: "Tools",
       description: "Manage the configuration and enabled status of MCP tools.",
+      adminRequired: "Admin privileges are required to manage MCP tools.",
+      empty: "No MCP tools configured.",
+    },
+    channels: {
+      title: "Channels",
+      description:
+        "Connect IM accounts that can send messages to DeerFlow from outside the browser.",
+      disabled:
+        "Channel connections are not enabled on this server. Ask an administrator to enable channel_connections.",
     },
     skills: {
       title: "Agent Skills",
@@ -446,9 +529,58 @@ export const enUS: Translations = {
       notSupported: "Your browser does not support notifications.",
       disableNotification: "Disable notification",
     },
+    account: {
+      profileTitle: "Profile",
+      email: "Email",
+      role: "Role",
+      ssoProvider: "SSO",
+      changePasswordTitle: "Change Password",
+      changePasswordDescription: "Update your account password.",
+      ssoPasswordDescription: "Password is managed by your SSO provider.",
+      ssoPasswordMessage:
+        "This account signs in with {provider}, so DeerFlow cannot manage or change its password here. Use your SSO provider's account settings instead.",
+      currentPassword: "Current password",
+      newPassword: "New password",
+      confirmNewPassword: "Confirm new password",
+      passwordMismatch: "New passwords do not match",
+      passwordTooShort: "Password must be at least 8 characters",
+      passwordChangedSuccess: "Password changed successfully",
+      networkError: "Network error. Please try again.",
+      updating: "Updating...",
+      updatePassword: "Update Password",
+      signOut: "Sign Out",
+    },
     acknowledge: {
       emptyTitle: "Acknowledgements",
       emptyDescription: "Credits and acknowledgements will show here.",
+    },
+  },
+  login: {
+    signInTitle: "Sign in to your account",
+    createAccountTitle: "Create a new account",
+    email: "Email",
+    emailPlaceholder: "you@example.com",
+    password: "Password",
+    passwordPlaceholder: "•••••••",
+    pleaseWait: "Please wait...",
+    signIn: "Sign In",
+    createAccount: "Create Account",
+    orContinueWith: "Or continue with",
+    ssoHint:
+      "If your account uses single sign-on, sign in with the option below instead.",
+    continueWith: (provider: string) => `Continue with ${provider}`,
+    noAccountSignUp: "Don't have an account? Sign up",
+    haveAccountSignIn: "Already have an account? Sign in",
+    backToHome: "← Back to home",
+    networkError: "Network error. Please try again.",
+    authFailed: "Authentication failed.",
+    errors: {
+      sso_failed: "SSO login failed. Please try again or use email login.",
+      sso_cancelled: "SSO login was cancelled.",
+      sso_account_exists:
+        "An account with this email already exists. Please sign in with your password or contact your administrator.",
+      sso_not_allowed:
+        "SSO login is not allowed for your account. Contact your administrator.",
     },
   },
 };

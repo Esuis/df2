@@ -1,5 +1,7 @@
 """Configuration for memory mechanism."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -14,8 +16,9 @@ class MemoryConfig(BaseModel):
         default="",
         description=(
             "Path to store memory data. "
-            "If empty, defaults to `{base_dir}/memory.json` (see Paths.memory_file). "
-            "Absolute paths are used as-is. "
+            "If empty, defaults to per-user memory at `{base_dir}/users/{user_id}/memory.json`. "
+            "Absolute paths are used as-is and opt out of per-user isolation "
+            "(all users share the same file). "
             "Relative paths are resolved against `Paths.base_dir` "
             "(not the backend working directory). "
             "Note: if you previously set this to `.deer-flow/memory.json`, "
@@ -58,6 +61,17 @@ class MemoryConfig(BaseModel):
         ge=100,
         le=8000,
         description="Maximum tokens to use for memory injection",
+    )
+    token_counting: Literal["tiktoken", "char"] = Field(
+        default="tiktoken",
+        description=(
+            "Token counting strategy for memory-injection budgeting. "
+            "'tiktoken' is accurate but the encoding's BPE data may be "
+            "downloaded from a public network endpoint on first use, which "
+            "can block for a long time in network-restricted environments "
+            "(see issue #3402/#3429). 'char' uses a network-free "
+            "CJK-aware character-based estimate and never touches tiktoken."
+        ),
     )
 
 

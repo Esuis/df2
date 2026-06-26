@@ -19,20 +19,21 @@ import asyncio
 import json
 import logging
 import mimetypes
+import os
 import shutil
 import tempfile
 import uuid
 from collections.abc import Generator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
-from deerflow.agents.lead_agent.agent import _build_middlewares
+from deerflow.agents.lead_agent.agent import build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
@@ -40,7 +41,10 @@ from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.config.paths import get_paths
 from deerflow.models import create_chat_model
-from deerflow.skills.installer import install_skill_from_archive
+from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.skills.storage import get_or_new_skill_storage
+from deerflow.tools.builtins.tool_search import assemble_deferred_tools
+from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
     claim_unique_filename,
     delete_file_safe,
@@ -53,6 +57,9 @@ from deerflow.uploads.manager import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+StreamEventType = Literal["values", "messages-tuple", "custom", "end"]
 
 
 @dataclass
@@ -69,7 +76,7 @@ class StreamEvent:
         data: Event payload. Contents vary by type.
     """
 
-    type: str
+    type: StreamEventType
     data: dict[str, Any] = field(default_factory=dict)
 
 
@@ -119,6 +126,7 @@ class DeerFlowClient:
         agent_name: str | None = None,
         available_skills: set[str] | None = None,
         middlewares: Sequence[AgentMiddleware] | None = None,
+        environment: str | None = None,
     ):
         """Initialize the client.
 
@@ -136,6 +144,12 @@ class DeerFlowClient:
             agent_name: Name of the agent to use.
             available_skills: Optional set of skill names to make available. If None (default), all scanned skills are available.
             middlewares: Optional list of custom middlewares to inject into the agent.
+            environment: Deployment environment label that ends up in
+                ``langfuse_tags`` (e.g. ``"production"`` / ``"staging"``).
+                When ``None`` the worker/client falls back to the
+                ``DEER_FLOW_ENV`` or ``ENVIRONMENT`` env vars. Pass an
+                explicit value for programmatic callers that do not want
+                env-var coupling.
         """
         if config_path is not None:
             reload_app_config(config_path)
@@ -152,6 +166,7 @@ class DeerFlowClient:
         self._agent_name = agent_name
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._middlewares = list(middlewares) if middlewares else []
+        self._environment = environment
 
         # Lazy agent — created on first call, recreated when config changes.
         self._agent = None
@@ -223,21 +238,36 @@ class DeerFlowClient:
         subagent_enabled = cfg.get("subagent_enabled", False)
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
 
+        tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
+        final_tools, deferred_setup = assemble_deferred_tools(tools, enabled=self._app_config.tool_search.enabled)
         kwargs: dict[str, Any] = {
-            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled),
-            "tools": self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled),
-            "middleware": _build_middlewares(config, model_name=model_name, agent_name=self._agent_name, custom_middlewares=self._middlewares),
+            # attach_tracing=False because ``stream()`` injects tracing
+            # callbacks at the graph invocation root so a single embedded run
+            # produces one trace with correct session_id / user_id propagation.
+            # Attaching them again on the model would emit duplicate spans.
+            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled, attach_tracing=False),
+            "tools": final_tools,
+            "middleware": build_middlewares(
+                config,
+                model_name=model_name,
+                agent_name=self._agent_name,
+                available_skills=self._available_skills,
+                custom_middlewares=self._middlewares,
+                app_config=self._app_config,
+                deferred_setup=deferred_setup,
+            ),
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
                 agent_name=self._agent_name,
                 available_skills=self._available_skills,
+                deferred_names=deferred_setup.deferred_names,
             ),
             "state_schema": ThreadState,
         }
         checkpointer = self._checkpointer
         if checkpointer is None:
-            from deerflow.agents.checkpointer import get_checkpointer
+            from deerflow.runtime.checkpointer import get_checkpointer
 
             checkpointer = get_checkpointer()
         if checkpointer is not None:
@@ -255,27 +285,88 @@ class DeerFlowClient:
         return get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled)
 
     @staticmethod
+    def _serialize_tool_calls(tool_calls) -> list[dict]:
+        """Reshape LangChain tool_calls into the wire format used in events."""
+        return [{"name": tc["name"], "args": tc["args"], "id": tc.get("id")} for tc in tool_calls]
+
+    @staticmethod
+    def _serialize_additional_kwargs(msg) -> dict[str, Any] | None:
+        """Copy message additional_kwargs when present."""
+        additional_kwargs = getattr(msg, "additional_kwargs", None)
+        if isinstance(additional_kwargs, dict) and additional_kwargs:
+            return dict(additional_kwargs)
+        return None
+
+    @staticmethod
+    def _ai_text_event(msg_id: str | None, text: str, usage: dict | None, additional_kwargs: dict[str, Any] | None = None) -> "StreamEvent":
+        """Build a ``messages-tuple`` AI text event."""
+        data: dict[str, Any] = {"type": "ai", "content": text, "id": msg_id}
+        if usage:
+            data["usage_metadata"] = usage
+        if additional_kwargs:
+            data["additional_kwargs"] = additional_kwargs
+        return StreamEvent(type="messages-tuple", data=data)
+
+    @staticmethod
+    def _ai_tool_calls_event(msg_id: str | None, tool_calls, additional_kwargs: dict[str, Any] | None = None) -> "StreamEvent":
+        """Build a ``messages-tuple`` AI tool-calls event."""
+        data: dict[str, Any] = {
+            "type": "ai",
+            "content": "",
+            "id": msg_id,
+            "tool_calls": DeerFlowClient._serialize_tool_calls(tool_calls),
+        }
+        if additional_kwargs:
+            data["additional_kwargs"] = additional_kwargs
+        return StreamEvent(type="messages-tuple", data=data)
+
+    @staticmethod
+    def _tool_message_event(msg: ToolMessage) -> "StreamEvent":
+        """Build a ``messages-tuple`` tool-result event from a ToolMessage."""
+        return StreamEvent(
+            type="messages-tuple",
+            data={
+                "type": "tool",
+                "content": DeerFlowClient._extract_text(msg.content),
+                "name": msg.name,
+                "tool_call_id": msg.tool_call_id,
+                "id": msg.id,
+            },
+        )
+
+    @staticmethod
     def _serialize_message(msg) -> dict:
         """Serialize a LangChain message to a plain dict for values events."""
         if isinstance(msg, AIMessage):
             d: dict[str, Any] = {"type": "ai", "content": msg.content, "id": getattr(msg, "id", None)}
             if msg.tool_calls:
-                d["tool_calls"] = [{"name": tc["name"], "args": tc["args"], "id": tc.get("id")} for tc in msg.tool_calls]
+                d["tool_calls"] = DeerFlowClient._serialize_tool_calls(msg.tool_calls)
             if getattr(msg, "usage_metadata", None):
                 d["usage_metadata"] = msg.usage_metadata
+            if additional_kwargs := DeerFlowClient._serialize_additional_kwargs(msg):
+                d["additional_kwargs"] = additional_kwargs
             return d
         if isinstance(msg, ToolMessage):
-            return {
+            d = {
                 "type": "tool",
                 "content": DeerFlowClient._extract_text(msg.content),
                 "name": getattr(msg, "name", None),
                 "tool_call_id": getattr(msg, "tool_call_id", None),
                 "id": getattr(msg, "id", None),
             }
+            if additional_kwargs := DeerFlowClient._serialize_additional_kwargs(msg):
+                d["additional_kwargs"] = additional_kwargs
+            return d
         if isinstance(msg, HumanMessage):
-            return {"type": "human", "content": msg.content, "id": getattr(msg, "id", None)}
+            d = {"type": "human", "content": msg.content, "id": getattr(msg, "id", None)}
+            if additional_kwargs := DeerFlowClient._serialize_additional_kwargs(msg):
+                d["additional_kwargs"] = additional_kwargs
+            return d
         if isinstance(msg, SystemMessage):
-            return {"type": "system", "content": msg.content, "id": getattr(msg, "id", None)}
+            d = {"type": "system", "content": msg.content, "id": getattr(msg, "id", None)}
+            if additional_kwargs := DeerFlowClient._serialize_additional_kwargs(msg):
+                d["additional_kwargs"] = additional_kwargs
+            return d
         return {"type": "unknown", "content": str(msg), "id": getattr(msg, "id", None)}
 
     @staticmethod
@@ -316,6 +407,108 @@ class DeerFlowClient:
         return str(content)
 
     # ------------------------------------------------------------------
+    # Public API — threads
+    # ------------------------------------------------------------------
+
+    def list_threads(self, limit: int = 10) -> dict:
+        """List the recent N threads.
+
+        Args:
+            limit: Maximum number of threads to return. Default is 10.
+
+        Returns:
+            Dict with "thread_list" key containing list of thread info dicts,
+            sorted by thread creation time descending.
+        """
+        checkpointer = self._checkpointer
+        if checkpointer is None:
+            from deerflow.runtime.checkpointer.provider import get_checkpointer
+
+            checkpointer = get_checkpointer()
+
+        thread_info_map = {}
+
+        for cp in checkpointer.list(config=None, limit=limit):
+            cfg = cp.config.get("configurable", {})
+            thread_id = cfg.get("thread_id")
+            if not thread_id:
+                continue
+
+            ts = cp.checkpoint.get("ts")
+            checkpoint_id = cfg.get("checkpoint_id")
+
+            if thread_id not in thread_info_map:
+                channel_values = cp.checkpoint.get("channel_values", {})
+                thread_info_map[thread_id] = {
+                    "thread_id": thread_id,
+                    "created_at": ts,
+                    "updated_at": ts,
+                    "latest_checkpoint_id": checkpoint_id,
+                    "title": channel_values.get("title"),
+                }
+            else:
+                # Explicitly compare timestamps to ensure accuracy when iterating over unordered namespaces.
+                # Treat None as "missing" and only compare when existing values are non-None.
+                if ts is not None:
+                    current_created = thread_info_map[thread_id]["created_at"]
+                    if current_created is None or ts < current_created:
+                        thread_info_map[thread_id]["created_at"] = ts
+
+                    current_updated = thread_info_map[thread_id]["updated_at"]
+                    if current_updated is None or ts > current_updated:
+                        thread_info_map[thread_id]["updated_at"] = ts
+                        thread_info_map[thread_id]["latest_checkpoint_id"] = checkpoint_id
+                        channel_values = cp.checkpoint.get("channel_values", {})
+                        thread_info_map[thread_id]["title"] = channel_values.get("title")
+
+        threads = list(thread_info_map.values())
+        threads.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+
+        return {"thread_list": threads[:limit]}
+
+    def get_thread(self, thread_id: str) -> dict:
+        """Get the complete thread record, including all node execution records.
+
+        Args:
+            thread_id: Thread ID.
+
+        Returns:
+            Dict containing the thread's full checkpoint history.
+        """
+        checkpointer = self._checkpointer
+        if checkpointer is None:
+            from deerflow.runtime.checkpointer.provider import get_checkpointer
+
+            checkpointer = get_checkpointer()
+
+        config = {"configurable": {"thread_id": thread_id}}
+        checkpoints = []
+
+        for cp in checkpointer.list(config):
+            channel_values = dict(cp.checkpoint.get("channel_values", {}))
+            if "messages" in channel_values:
+                channel_values["messages"] = [self._serialize_message(m) if hasattr(m, "content") else m for m in channel_values["messages"]]
+
+            cfg = cp.config.get("configurable", {})
+            parent_cfg = cp.parent_config.get("configurable", {}) if cp.parent_config else {}
+
+            checkpoints.append(
+                {
+                    "checkpoint_id": cfg.get("checkpoint_id"),
+                    "parent_checkpoint_id": parent_cfg.get("checkpoint_id"),
+                    "ts": cp.checkpoint.get("ts"),
+                    "metadata": cp.metadata,
+                    "values": channel_values,
+                    "pending_writes": [{"task_id": w[0], "channel": w[1], "value": w[2]} for w in getattr(cp, "pending_writes", [])],
+                }
+            )
+
+        # Sort globally by timestamp to prevent partial ordering issues caused by different namespaces (e.g., subgraphs)
+        checkpoints.sort(key=lambda x: x["ts"] if x["ts"] else "")
+
+        return {"thread_id": thread_id, "checkpoints": checkpoints}
+
+    # ------------------------------------------------------------------
     # Public API — conversation
     # ------------------------------------------------------------------
 
@@ -336,6 +529,53 @@ class DeerFlowClient:
         consumers can switch between HTTP streaming and embedded mode
         without changing their event-handling logic.
 
+        Token-level streaming
+        ~~~~~~~~~~~~~~~~~~~~~
+        This method subscribes to LangGraph's ``messages`` stream mode, so
+        ``messages-tuple`` events for AI text are emitted as **deltas** as
+        the model generates tokens, not as one cumulative dump at node
+        completion.  Each delta carries a stable ``id`` — consumers that
+        want the full text must accumulate ``content`` per ``id``.
+        ``chat()`` already does this for you.
+
+        Tool calls and tool results are still emitted once per logical
+        message.  ``values`` events continue to carry full state snapshots
+        after each graph node finishes; AI text already delivered via the
+        ``messages`` stream is **not** re-synthesized from the snapshot to
+        avoid duplicate deliveries.
+
+        Why not reuse Gateway's ``run_agent``?
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        Gateway (``runtime/runs/worker.py``) has a complete streaming
+        pipeline: ``run_agent`` → ``StreamBridge`` → ``sse_consumer``.  It
+        looks like this client duplicates that work, but the two paths
+        serve different audiences and **cannot** share execution:
+
+        * ``run_agent`` is ``async def`` and uses ``agent.astream()``;
+          this method is a sync generator using ``agent.stream()`` so
+          callers can write ``for event in client.stream(...)`` without
+          touching asyncio.  Bridging the two would require spinning up
+          an event loop + thread per call.
+        * Gateway events are JSON-serialized by ``serialize()`` for SSE
+          wire transmission.  This client yields in-process stream event
+          payloads directly as Python data structures (``StreamEvent``
+          with ``data`` as a plain ``dict``), without the extra
+          JSON/SSE serialization layer used for HTTP delivery.
+        * ``StreamBridge`` is an asyncio-queue decoupling producers from
+          consumers across an HTTP boundary (``Last-Event-ID`` replay,
+          heartbeats, multi-subscriber fan-out).  A single in-process
+          caller with a direct iterator needs none of that.
+
+        So ``DeerFlowClient.stream()`` is a parallel, sync, in-process
+        consumer of the same ``create_agent()`` factory — not a wrapper
+        around Gateway.  The two paths **should** stay in sync on which
+        LangGraph stream modes they subscribe to; that invariant is
+        enforced by ``tests/test_client.py::test_messages_mode_emits_token_deltas``
+        rather than by a shared constant, because the three layers
+        (Graph, Platform SDK, HTTP) each use their own naming
+        (``messages`` vs ``messages-tuple``) and cannot literally share
+        a string.
+
         Args:
             message: User message text.
             thread_id: Thread ID for conversation context. Auto-generated if None.
@@ -346,9 +586,10 @@ class DeerFlowClient:
             StreamEvent with one of:
             - type="values"          data={"title": str|None, "messages": [...], "artifacts": [...]}
             - type="custom"          data={...}
-            - type="messages-tuple"  data={"type": "ai", "content": str, "id": str}
-            - type="messages-tuple"  data={"type": "ai", "content": str, "id": str, "usage_metadata": {...}}
+            - type="messages-tuple"  data={"type": "ai", "content": <delta>, "id": str}
+            - type="messages-tuple"  data={"type": "ai", "content": <delta>, "id": str, "usage_metadata": {...}}
             - type="messages-tuple"  data={"type": "ai", "content": "", "id": str, "tool_calls": [...]}
+            - type="messages-tuple"  data={"type": "ai", "content": "", "id": str, "additional_kwargs": {...}}
             - type="messages-tuple"  data={"type": "tool", "content": str, "name": str, "tool_call_id": str, "id": str}
             - type="end"             data={"usage": {"input_tokens": int, "output_tokens": int, "total_tokens": int}}
         """
@@ -356,6 +597,28 @@ class DeerFlowClient:
             thread_id = str(uuid.uuid4())
 
         config = self._get_runnable_config(thread_id, **kwargs)
+
+        # Inject tracing callbacks and Langfuse trace metadata at the graph
+        # invocation root so the embedded client matches the gateway worker's
+        # behaviour: a single ``stream()`` produces one trace with all node /
+        # LLM / tool calls nested under it, and the trace carries the reserved
+        # ``langfuse_session_id`` / ``langfuse_user_id`` keys that the Langfuse
+        # CallbackHandler lifts onto the root trace's ``sessionId`` / ``userId``.
+        tracing_callbacks = build_tracing_callbacks()
+        if tracing_callbacks:
+            existing_callbacks = list(config.get("callbacks") or [])
+            config["callbacks"] = [*existing_callbacks, *tracing_callbacks]
+
+        configurable = config.get("configurable") or {}
+        inject_langfuse_metadata(
+            config,
+            thread_id=thread_id,
+            user_id=get_effective_user_id(),
+            assistant_id=self._agent_name or "lead-agent",
+            model_name=configurable.get("model_name") or self._model_name,
+            environment=self._environment or os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+        )
+
         self._ensure_agent(config)
 
         state: dict[str, Any] = {"messages": [HumanMessage(content=message)]}
@@ -364,13 +627,62 @@ class DeerFlowClient:
             context["agent_name"] = self._agent_name
 
         seen_ids: set[str] = set()
+        # Cross-mode handoff: ids already streamed via LangGraph ``messages``
+        # mode so the ``values`` path skips re-synthesis of the same message.
+        streamed_ids: set[str] = set()
+        # The same message id carries identical cumulative ``usage_metadata``
+        # in both the final ``messages`` chunk and the values snapshot —
+        # count it only on whichever arrives first.
+        counted_usage_ids: set[str] = set()
+        sent_additional_kwargs_by_id: dict[str, dict[str, Any]] = {}
         cumulative_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+        def _account_usage(msg_id: str | None, usage: Any) -> dict | None:
+            """Add *usage* to cumulative totals if this id has not been counted.
+
+            ``usage`` is a ``langchain_core.messages.UsageMetadata`` TypedDict
+            or ``None``; typed as ``Any`` because TypedDicts are not
+            structurally assignable to plain ``dict`` under strict type
+            checking.  Returns the normalized usage dict (for attaching
+            to an event) when we accepted it, otherwise ``None``.
+            """
+            if not usage:
+                return None
+            if msg_id and msg_id in counted_usage_ids:
+                return None
+            if msg_id:
+                counted_usage_ids.add(msg_id)
+            input_tokens = usage.get("input_tokens", 0) or 0
+            output_tokens = usage.get("output_tokens", 0) or 0
+            total_tokens = usage.get("total_tokens", 0) or 0
+            cumulative_usage["input_tokens"] += input_tokens
+            cumulative_usage["output_tokens"] += output_tokens
+            cumulative_usage["total_tokens"] += total_tokens
+            return {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,
+            }
+
+        def _unsent_additional_kwargs(msg_id: str | None, additional_kwargs: dict[str, Any] | None) -> dict[str, Any] | None:
+            if not additional_kwargs:
+                return None
+            if not msg_id:
+                return additional_kwargs
+
+            sent = sent_additional_kwargs_by_id.setdefault(msg_id, {})
+            delta = {key: value for key, value in additional_kwargs.items() if sent.get(key) != value}
+            if not delta:
+                return None
+
+            sent.update(delta)
+            return delta
 
         for item in self._agent.stream(
             state,
             config=config,
             context=context,
-            stream_mode=["values", "custom"],
+            stream_mode=["values", "messages", "custom"],
         ):
             if isinstance(item, tuple) and len(item) == 2:
                 mode, chunk = item
@@ -382,6 +694,50 @@ class DeerFlowClient:
                 yield StreamEvent(type="custom", data=chunk)
                 continue
 
+            if mode == "messages":
+                # LangGraph ``messages`` mode emits ``(message_chunk, metadata)``.
+                if isinstance(chunk, tuple) and len(chunk) == 2:
+                    msg_chunk, _metadata = chunk
+                else:
+                    msg_chunk = chunk
+
+                msg_id = getattr(msg_chunk, "id", None)
+
+                if isinstance(msg_chunk, AIMessage):
+                    text = self._extract_text(msg_chunk.content)
+                    additional_kwargs = self._serialize_additional_kwargs(msg_chunk)
+                    counted_usage = _account_usage(msg_id, msg_chunk.usage_metadata)
+                    sent_additional_kwargs = False
+
+                    if text:
+                        if msg_id:
+                            streamed_ids.add(msg_id)
+                        additional_kwargs_delta = _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        yield self._ai_text_event(
+                            msg_id,
+                            text,
+                            counted_usage,
+                            additional_kwargs_delta,
+                        )
+                        sent_additional_kwargs = bool(additional_kwargs_delta)
+
+                    if msg_chunk.tool_calls:
+                        if msg_id:
+                            streamed_ids.add(msg_id)
+                        additional_kwargs_delta = None if sent_additional_kwargs else _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        yield self._ai_tool_calls_event(
+                            msg_id,
+                            msg_chunk.tool_calls,
+                            additional_kwargs_delta,
+                        )
+
+                elif isinstance(msg_chunk, ToolMessage):
+                    if msg_id:
+                        streamed_ids.add(msg_id)
+                    yield self._tool_message_event(msg_chunk)
+                continue
+
+            # mode == "values"
             messages = chunk.get("messages", [])
 
             for msg in messages:
@@ -391,47 +747,53 @@ class DeerFlowClient:
                 if msg_id:
                     seen_ids.add(msg_id)
 
+                # Already streamed via ``messages`` mode; only (defensively)
+                # capture usage here and skip re-synthesizing the event.
+                if msg_id and msg_id in streamed_ids:
+                    if isinstance(msg, AIMessage):
+                        _account_usage(msg_id, getattr(msg, "usage_metadata", None))
+                        additional_kwargs = self._serialize_additional_kwargs(msg)
+                        additional_kwargs_delta = _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        if additional_kwargs_delta:
+                            # Metadata-only follow-up: ``messages-tuple`` has no
+                            # dedicated attribution event, so clients should
+                            # merge this empty-content AI event by message id
+                            # and ignore it for text rendering.
+                            yield self._ai_text_event(msg_id, "", None, additional_kwargs_delta)
+                    continue
+
                 if isinstance(msg, AIMessage):
-                    # Track token usage from AI messages
-                    usage = getattr(msg, "usage_metadata", None)
-                    if usage:
-                        cumulative_usage["input_tokens"] += usage.get("input_tokens", 0) or 0
-                        cumulative_usage["output_tokens"] += usage.get("output_tokens", 0) or 0
-                        cumulative_usage["total_tokens"] += usage.get("total_tokens", 0) or 0
+                    counted_usage = _account_usage(msg_id, msg.usage_metadata)
+                    additional_kwargs = self._serialize_additional_kwargs(msg)
+                    sent_additional_kwargs = False
 
                     if msg.tool_calls:
-                        yield StreamEvent(
-                            type="messages-tuple",
-                            data={
-                                "type": "ai",
-                                "content": "",
-                                "id": msg_id,
-                                "tool_calls": [{"name": tc["name"], "args": tc["args"], "id": tc.get("id")} for tc in msg.tool_calls],
-                            },
+                        additional_kwargs_delta = _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        yield self._ai_tool_calls_event(
+                            msg_id,
+                            msg.tool_calls,
+                            additional_kwargs_delta,
                         )
+                        sent_additional_kwargs = bool(additional_kwargs_delta)
 
                     text = self._extract_text(msg.content)
                     if text:
-                        event_data: dict[str, Any] = {"type": "ai", "content": text, "id": msg_id}
-                        if usage:
-                            event_data["usage_metadata"] = {
-                                "input_tokens": usage.get("input_tokens", 0) or 0,
-                                "output_tokens": usage.get("output_tokens", 0) or 0,
-                                "total_tokens": usage.get("total_tokens", 0) or 0,
-                            }
-                        yield StreamEvent(type="messages-tuple", data=event_data)
+                        additional_kwargs_delta = None if sent_additional_kwargs else _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        yield self._ai_text_event(
+                            msg_id,
+                            text,
+                            counted_usage,
+                            additional_kwargs_delta,
+                        )
+                    elif msg_id:
+                        additional_kwargs_delta = None if sent_additional_kwargs else _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        if not additional_kwargs_delta:
+                            continue
+                        # See the metadata-only follow-up convention above.
+                        yield self._ai_text_event(msg_id, "", None, additional_kwargs_delta)
 
                 elif isinstance(msg, ToolMessage):
-                    yield StreamEvent(
-                        type="messages-tuple",
-                        data={
-                            "type": "tool",
-                            "content": self._extract_text(msg.content),
-                            "name": getattr(msg, "name", None),
-                            "tool_call_id": getattr(msg, "tool_call_id", None),
-                            "id": msg_id,
-                        },
-                    )
+                    yield self._tool_message_event(msg)
 
             # Emit a values event for each state snapshot
             yield StreamEvent(
@@ -448,10 +810,12 @@ class DeerFlowClient:
     def chat(self, message: str, *, thread_id: str | None = None, **kwargs) -> str:
         """Send a message and return the final text response.
 
-        Convenience wrapper around :meth:`stream` that returns only the
-        **last** AI text from ``messages-tuple`` events. If the agent emits
-        multiple text segments in one turn, intermediate segments are
-        discarded. Use :meth:`stream` directly to capture all events.
+        Convenience wrapper around :meth:`stream` that accumulates delta
+        ``messages-tuple`` events per ``id`` and returns the text of the
+        **last** AI message to complete.  Intermediate AI messages (e.g.
+        planner drafts) are discarded — only the final id's accumulated
+        text is returned.  Use :meth:`stream` directly if you need every
+        delta as it arrives.
 
         Args:
             message: User message text.
@@ -459,15 +823,21 @@ class DeerFlowClient:
             **kwargs: Override client defaults (same as stream()).
 
         Returns:
-            The last AI message text, or empty string if no response.
+            The accumulated text of the last AI message, or empty string
+            if no AI text was produced.
         """
-        last_text = ""
+        # Per-id delta lists joined once at the end — avoids the O(n²) cost
+        # of repeated ``str + str`` on a growing buffer for long responses.
+        chunks: dict[str, list[str]] = {}
+        last_id: str = ""
         for event in self.stream(message, thread_id=thread_id, **kwargs):
             if event.type == "messages-tuple" and event.data.get("type") == "ai":
-                content = event.data.get("content", "")
-                if content:
-                    last_text = content
-        return last_text
+                msg_id = event.data.get("id") or ""
+                delta = event.data.get("content", "")
+                if delta:
+                    chunks.setdefault(msg_id, []).append(delta)
+                    last_id = msg_id
+        return "".join(chunks.get(last_id, ()))
 
     # ------------------------------------------------------------------
     # Public API — configuration queries
@@ -480,6 +850,10 @@ class DeerFlowClient:
             Dict with "models" key containing list of model info dicts,
             matching the Gateway API ``ModelsListResponse`` schema.
         """
+        token_usage_enabled = getattr(getattr(self._app_config, "token_usage", None), "enabled", False)
+        if not isinstance(token_usage_enabled, bool):
+            token_usage_enabled = False
+
         return {
             "models": [
                 {
@@ -491,7 +865,8 @@ class DeerFlowClient:
                     "supports_reasoning_effort": getattr(model, "supports_reasoning_effort", False),
                 }
                 for model in self._app_config.models
-            ]
+            ],
+            "token_usage": {"enabled": token_usage_enabled},
         }
 
     def list_skills(self, enabled_only: bool = False) -> dict:
@@ -504,8 +879,6 @@ class DeerFlowClient:
             Dict with "skills" key containing list of skill info dicts,
             matching the Gateway API ``SkillsListResponse`` schema.
         """
-        from deerflow.skills.loader import load_skills
-
         return {
             "skills": [
                 {
@@ -515,7 +888,7 @@ class DeerFlowClient:
                     "category": s.category,
                     "enabled": s.enabled,
                 }
-                for s in load_skills(enabled_only=enabled_only)
+                for s in get_or_new_skill_storage().load_skills(enabled_only=enabled_only)
             ]
         }
 
@@ -527,19 +900,19 @@ class DeerFlowClient:
         """
         from deerflow.agents.memory.updater import get_memory_data
 
-        return get_memory_data()
+        return get_memory_data(user_id=get_effective_user_id())
 
     def export_memory(self) -> dict:
         """Export current memory data for backup or transfer."""
         from deerflow.agents.memory.updater import get_memory_data
 
-        return get_memory_data()
+        return get_memory_data(user_id=get_effective_user_id())
 
     def import_memory(self, memory_data: dict) -> dict:
         """Import and persist full memory data."""
         from deerflow.agents.memory.updater import import_memory_data
 
-        return import_memory_data(memory_data)
+        return import_memory_data(memory_data, user_id=get_effective_user_id())
 
     def get_model(self, name: str) -> dict | None:
         """Get a specific model's configuration by name.
@@ -624,9 +997,9 @@ class DeerFlowClient:
         Returns:
             Skill info dict, or None if not found.
         """
-        from deerflow.skills.loader import load_skills
+        from deerflow.skills.storage import get_or_new_skill_storage
 
-        skill = next((s for s in load_skills(enabled_only=False) if s.name == name), None)
+        skill = next((s for s in get_or_new_skill_storage().load_skills(enabled_only=False) if s.name == name), None)
         if skill is None:
             return None
         return {
@@ -651,9 +1024,9 @@ class DeerFlowClient:
             ValueError: If the skill is not found.
             OSError: If the config file cannot be written.
         """
-        from deerflow.skills.loader import load_skills
+        from deerflow.skills.storage import get_or_new_skill_storage
 
-        skills = load_skills(enabled_only=False)
+        skills = get_or_new_skill_storage().load_skills(enabled_only=False)
         skill = next((s for s in skills if s.name == name), None)
         if skill is None:
             raise ValueError(f"Skill '{name}' not found")
@@ -676,7 +1049,7 @@ class DeerFlowClient:
         self._agent_config_key = None
         reload_extensions_config()
 
-        updated = next((s for s in load_skills(enabled_only=False) if s.name == name), None)
+        updated = next((s for s in get_or_new_skill_storage().load_skills(enabled_only=False) if s.name == name), None)
         if updated is None:
             raise RuntimeError(f"Skill '{name}' disappeared after update")
         return {
@@ -700,7 +1073,7 @@ class DeerFlowClient:
             FileNotFoundError: If the file does not exist.
             ValueError: If the file is invalid.
         """
-        return install_skill_from_archive(skill_path)
+        return get_or_new_skill_storage().install_skill_from_archive(skill_path)
 
     # ------------------------------------------------------------------
     # Public API — memory management
@@ -714,13 +1087,13 @@ class DeerFlowClient:
         """
         from deerflow.agents.memory.updater import reload_memory_data
 
-        return reload_memory_data()
+        return reload_memory_data(user_id=get_effective_user_id())
 
     def clear_memory(self) -> dict:
         """Clear all persisted memory data."""
         from deerflow.agents.memory.updater import clear_memory_data
 
-        return clear_memory_data()
+        return clear_memory_data(user_id=get_effective_user_id())
 
     def create_memory_fact(self, content: str, category: str = "context", confidence: float = 0.5) -> dict:
         """Create a single fact manually."""
@@ -768,6 +1141,7 @@ class DeerFlowClient:
             "fact_confidence_threshold": config.fact_confidence_threshold,
             "injection_enabled": config.injection_enabled,
             "max_injection_tokens": config.max_injection_tokens,
+            "token_counting": config.token_counting,
         }
 
     def get_memory_status(self) -> dict:
@@ -845,7 +1219,7 @@ class DeerFlowClient:
 
                 info: dict[str, Any] = {
                     "filename": dest_name,
-                    "size": str(dest.stat().st_size),
+                    "size": dest.stat().st_size,
                     "path": str(dest),
                     "virtual_path": upload_virtual_path(dest_name),
                     "artifact_url": upload_artifact_url(thread_id, dest_name),
@@ -937,7 +1311,7 @@ class DeerFlowClient:
             ValueError: If the path is invalid.
         """
         try:
-            actual = get_paths().resolve_virtual_path(thread_id, path)
+            actual = get_paths().resolve_virtual_path(thread_id, path, user_id=get_effective_user_id())
         except ValueError as exc:
             if "traversal" in str(exc):
                 from deerflow.uploads.manager import PathTraversalError
