@@ -71,21 +71,25 @@ def logging_level_from_config(name: str | None) -> int:
 
 
 def apply_logging_level(name: str | None) -> None:
-    """Resolve *name* to a logging level and apply it to the ``deerflow``/``app`` logger hierarchies.
+    """Resolve *name* to a logging level and apply it as the baseline.
 
-    Only the ``deerflow`` and ``app`` logger levels are changed so that
-    third-party library verbosity (e.g. uvicorn, sqlalchemy) is not
-    affected. Root handler levels are lowered (never raised) so that
-    messages from the configured loggers can propagate through without
-    being filtered, while preserving handler thresholds that may be
-    intentionally restrictive for third-party log output.
+    Sets the root logger level so that all loggers inherit the
+    configured level by default.  Libraries that configure their own
+    loggers with explicit levels (e.g. uvicorn) are not affected.
+
+    Noisy third-party database loggers (sqlalchemy, aiosqlite) are
+    explicitly kept at ``WARNING`` or higher to prevent them from
+    flooding the log with per-query debug output.
     """
     level = logging_level_from_config(name)
+    logging.root.setLevel(level)
     for logger_name in ("deerflow", "app"):
         logging.getLogger(logger_name).setLevel(level)
-    for handler in logging.root.handlers:
-        if level < handler.level:
-            handler.setLevel(level)
+    # Keep noisy third-party database loggers at WARNING or above so
+    # that debug-level logging shows deerflow/app details without
+    # drowning in per-SQL-statement output.
+    for noisy in ("sqlalchemy", "sqlalchemy.engine", "sqlalchemy.pool", "aiosqlite"):
+        logging.getLogger(noisy).setLevel(max(level, logging.WARNING))
 
 
 class AppConfig(BaseModel):
