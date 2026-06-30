@@ -1,35 +1,60 @@
-"""中文版 SummarizationMiddleware，覆盖摘要前缀为中文，并增加详细的执行日志。"""
+"""中文版 DeerFlowSummarizationMiddleware，添加中文摘要前缀、中文 token 优化及详细执行日志。
+
+基于官方的 DeerFlowSummarizationMiddleware，继承其所有功能（Skill Rescue、
+Dynamic Context 保留、BeforeSummarizationHook、TAG_NOSTREAM 线程安全等），
+同时在关键步骤注入以下中文定制能力：
+
+1. chars_per_token=1.7（针对中文 token 计算优化）
+2. 摘要前缀改为中文（保留 name="summary" 使前端可隐藏）
+3. 逐条消息 token 估算明细日志
+4. 6 个关键步骤的结构化调试日志
+
+Log event 前缀约定：
+  summarization.before_model.{enter|exit}
+  summarization.should_summarize.{check_condition|result}
+  summarization.determine_cutoff_index
+  summarization.partition_with_skill_rescue
+  summarization.trim_for_summary
+  summarization.create_summary
+"""
+
+from __future__ import annotations
 
 import logging
 import math
 from functools import partial
 from typing import Any
 
-from langchain.agents.middleware.summarization import SummarizationMiddleware
 from langchain.agents.middleware.types import AgentState
 from langchain_core.messages import AIMessage, AnyMessage
 from langchain_core.messages.human import HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.runtime import Runtime
 
+from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+
 logger = logging.getLogger(__name__)
 
 
-class ChineseSummarizationMiddleware(SummarizationMiddleware):
-    """与 LangChain SummarizationMiddleware 完全一致，仅将摘要前缀改为中文，并增加执行日志。
+class ChineseSummarizationMiddleware(DeerFlowSummarizationMiddleware):
+    """基于官方 DeerFlowSummarizationMiddleware，增加中文优化和详细日志。
 
-    Log event 前缀约定：
-      summarization.before_model.{enter|exit}
-      summarization.should_summarize.{check_condition|result}
-      summarization.determine_cutoff_index
-      summarization.partition
-      summarization.trim_for_summary
-      summarization.create_summary
+    继承官方所有功能：
+      - Skill Rescue（压缩时保留最近加载的 skill 文件）
+      - Dynamic Context Reminder 保留
+      - BeforeSummarizationHook 回调机制
+      - TAG_NOSTREAM 线程安全模型分离
+
+    额外增加：
+      - chars_per_token=1.7 中文 token 计算
+      - 中文摘要前缀
+      - 逐条消息 token 估算明细
+      - 关键步骤结构化调试日志
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        # 中文场景为主，将 chars_per_token 从默认 4.0 调整为 2.0
+        # 中文场景 char-per-token 约为 1.7（父类默认 4.0 适用于英文）
         self.token_counter = partial(count_tokens_approximately, chars_per_token=1.7)
         original = self.token_counter
         self.token_counter = self._make_logging_counter(original)
@@ -48,17 +73,22 @@ class ChineseSummarizationMiddleware(SummarizationMiddleware):
                 }
         return {"input_tokens": None, "output_tokens": None, "total_tokens": None}
 
-    def before_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
-        messages = state.get("messages", [])
+    # ── _maybe_summarize / _amaybe_summarize — 入口出口日志包装 ──────────
+
+    def _maybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
+        messages = state["messages"]
         total_tokens = self.token_counter(messages)
         usage = self._get_last_usage(messages)
         logger.debug(
             "event=summarization.before_model.enter "
-            "total_tokens=%d message_count=%d ",
+            "total_tokens=%d message_count=%d input_tokens=%s output_tokens=%s total_usage=%s",
             total_tokens,
             len(messages),
+            usage["input_tokens"],
+            usage["output_tokens"],
+            usage["total_tokens"],
         )
-        result = super().before_model(state, runtime)
+        result = super()._maybe_summarize(state, runtime)
         if result is None:
             logger.debug(
                 "event=summarization.before_model.exit "
@@ -74,17 +104,20 @@ class ChineseSummarizationMiddleware(SummarizationMiddleware):
             )
         return result
 
-    async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
-        messages = state.get("messages", [])
+    async def _amaybe_summarize(self, state: AgentState, runtime: Runtime) -> dict | None:
+        messages = state["messages"]
         total_tokens = self.token_counter(messages)
         usage = self._get_last_usage(messages)
-        logger.info(
+        logger.debug(
             "event=summarization.abefore_model.enter "
-            "total_tokens=%d message_count=%d ",
+            "total_tokens=%d message_count=%d input_tokens=%s output_tokens=%s total_usage=%s",
             total_tokens,
             len(messages),
+            usage["input_tokens"],
+            usage["output_tokens"],
+            usage["total_tokens"],
         )
-        result = await super().abefore_model(state, runtime)
+        result = await super()._amaybe_summarize(state, runtime)
         if result is None:
             logger.debug(
                 "event=summarization.abefore_model.exit "
@@ -184,23 +217,26 @@ class ChineseSummarizationMiddleware(SummarizationMiddleware):
         )
         return result
 
-    # ── _partition_messages — 分区统计 ────────────────────────────────────
+    # ── _partition_with_skill_rescue — 分区日志（含 skill rescue 统计）────
 
-    def _partition_messages(
+    def _partition_with_skill_rescue(
         self,
-        conversation_messages: list[AnyMessage],
+        messages: list[AnyMessage],
         cutoff_index: int,
     ) -> tuple[list[AnyMessage], list[AnyMessage]]:
-        to_summarize, preserved = super()._partition_messages(conversation_messages, cutoff_index)
-        total_tokens = self.token_counter(preserved)
+        to_summarize, preserved = super()._partition_with_skill_rescue(messages, cutoff_index)
+        preserved_token_estimate = self.token_counter(preserved)
         logger.debug(
-            "event=summarization.partition "
-            "cutoff_index=%d to_summarize=%d preserved=%d total=%d preserved_token_estimate=%d",
+            "event=summarization.partition_with_skill_rescue "
+            "cutoff_index=%d total=%d to_summarize=%d preserved=%d preserved_token_estimate=%d "
+            "preserve_recent_skill_count=%d preserve_recent_skill_tokens=%d",
             cutoff_index,
+            len(messages),
             len(to_summarize),
             len(preserved),
-            len(conversation_messages),
-            total_tokens,
+            preserved_token_estimate,
+            self._preserve_recent_skill_count,
+            self._preserve_recent_skill_tokens,
         )
         return to_summarize, preserved
 
@@ -243,11 +279,8 @@ class ChineseSummarizationMiddleware(SummarizationMiddleware):
 
     # ── _make_logging_counter — token 计算逐条日志包装 ─────────────────────
 
-    def _make_logging_counter(
-        self, original: Any
-    ) -> Any:
+    def _make_logging_counter(self, original: Any) -> Any:
         """包装原始的 token_counter，逐条打印每条消息的 token 估算明细。"""
-        # 从 partial 中取出 chars_per_token（Claude 模型的参数）
         if isinstance(original, partial) and "chars_per_token" in original.keywords:
             chars_per_token = original.keywords["chars_per_token"]
         else:
@@ -260,7 +293,6 @@ class ChineseSummarizationMiddleware(SummarizationMiddleware):
                 if isinstance(msg.content, str):
                     content_len = len(msg.content)
                 elif isinstance(msg.content, list):
-                    # 多模态：只计文本块，图片块忽略（图片固定 85 tokens 但由 original 处理）
                     content_len = 0
                     for block in msg.content:
                         if isinstance(block, str):
@@ -273,7 +305,7 @@ class ChineseSummarizationMiddleware(SummarizationMiddleware):
                     content_len = len(repr(msg.content))
 
                 # 2. role 字符数
-                role = msg.type  # "human", "ai", "tool", "system"
+                role = msg.type
                 role_len = len(role)
 
                 # 3. tool_call_id（仅 ToolMessage）
@@ -328,9 +360,9 @@ class ChineseSummarizationMiddleware(SummarizationMiddleware):
 
         return wrapped
 
-    # ── _build_new_messages — 中文摘要前缀 ─────────────────────────────────
+    # ── _build_new_messages — 中文摘要前缀（保留 name="summary"）───────────
 
     def _build_new_messages(self, summary: str) -> list[HumanMessage]:
         return [
-            HumanMessage(content=f"以下是对话历史摘要：\n\n{summary}")
+            HumanMessage(content=f"以下是对话历史摘要：\n\n{summary}", name="summary")
         ]
