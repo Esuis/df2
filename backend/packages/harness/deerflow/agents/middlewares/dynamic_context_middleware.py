@@ -32,10 +32,12 @@ import asyncio
 import logging
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING, override
 
 from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
@@ -234,6 +236,58 @@ class DynamicContextMiddleware(AgentMiddleware):
         result_msgs = self._make_reminder_and_user_messages(messages[last_human_idx], self._build_date_update_reminder())
         logger.info("DynamicContextMiddleware: midnight crossing detected — injected date update before current turn")
         return {"messages": result_msgs}
+
+    # ------------------------------------------------------------------
+    # wrap_model_call — merge dynamic-context SystemMessage reminders
+    # into the request's system_message so only one SystemMessage reaches
+    # the LLM.  Providers like Qwen via vLLM reject multiple SystemMessages
+    # with "System message must be at the beginning."
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _merge_context_into_system_message(request: ModelRequest) -> ModelRequest:
+        """If *request* carries both a system_message and any
+        dynamic-context SystemMessage reminders in its messages list,
+        merge the reminder content into the system_message and remove
+        the separate reminders from the message list."""
+        if request.system_message is None:
+            return request
+
+        reminders = [m for m in request.messages if isinstance(m, SystemMessage) and is_dynamic_context_reminder(m)]
+        if not reminders:
+            return request
+
+        merged_content = request.system_message.content
+        for r in reminders:
+            merged_content += "\n\n" + r.content
+
+        merged = SystemMessage(
+            content=merged_content,
+            id=request.system_message.id,
+            additional_kwargs={
+                **request.system_message.additional_kwargs,
+                _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+            },
+        )
+
+        new_messages = [m for m in request.messages if not (isinstance(m, SystemMessage) and is_dynamic_context_reminder(m))]
+        return request.override(system_message=merged, messages=new_messages)
+
+    @override
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelCallResult:
+        return handler(self._merge_context_into_system_message(request))
+
+    @override
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelCallResult:
+        return await handler(self._merge_context_into_system_message(request))
 
     @override
     def before_agent(self, state, runtime: Runtime) -> dict | None:
