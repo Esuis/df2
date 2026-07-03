@@ -68,6 +68,7 @@ class LLMLoggerCallback(BaseCallbackHandler):
         thread_id = self._get_thread_id()
         
         logger.info("llm.invoke.start", extra={
+            "invoke_id": str(key),
             "thread_id": thread_id or "unknown",
             "model_name": model_name,
             "actual_model": actual_model,
@@ -140,7 +141,11 @@ class LLMLoggerCallback(BaseCallbackHandler):
         
         thread_id = self._get_thread_id()
         
+        # 推断 invoke_id：优先用 run_id，回退到用过的 key
+        invoke_id = str(run_id) if run_id is not None else (model_name or "unknown")
+        
         logger.info("llm.invoke.end", extra={
+            "invoke_id": invoke_id,
             "thread_id": thread_id or "unknown",
             "model_name": model_name or "unknown",
             "actual_model": actual_model or "unknown",
@@ -189,6 +194,7 @@ class LLMLoggerCallback(BaseCallbackHandler):
         thread_id = self._get_thread_id()
 
         logger.error("llm.invoke.error", extra={
+            "invoke_id": str(run_id) if run_id is not None else "unknown",
             "thread_id": thread_id or "unknown",
             "error": str(error),
             "actual_model": actual_model or "unknown",
