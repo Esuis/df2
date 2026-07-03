@@ -36,6 +36,7 @@ from typing import Any
 from pydantic import Field, SecretStr
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessageChunk
+from langchain_core.outputs import ChatResult
 from langchain_openai import ChatOpenAI
 
 from deerflow.models.ellm_apikey_manager import EllmApiKeyManager
@@ -171,3 +172,32 @@ class EllmChatModel(ChatOpenAI):
                     msg.content = "<think>\n" + msg.content
                     _injected = True
             yield chunk
+
+    def _create_chat_result(
+        self,
+        response: dict | Any,
+        generation_info: dict | None = None,
+    ) -> ChatResult:
+        """Override to defend against empty/string responses from the ELLM gateway.
+
+        The ELLM adapter may return HTTP 200 with an empty body when the
+        upstream model times out.  The default langchain-openai implementation
+        calls ``response.model_dump()`` on non-dict responses, which crashes
+        with ``AttributeError`` when the response is a raw string (e.g. "").
+        We raise a descriptive ``ValueError`` so upstream middleware can
+        handle it as a transient / provider error.
+        """
+        if isinstance(response, str):
+            preview = repr(response) if response else "<empty>"
+            logger.warning(
+                "ELLM gateway returned non-JSON string response (length=%d): %s",
+                len(response),
+                preview,
+            )
+            raise ValueError(
+                f"ELLM gateway returned a non-JSON response "
+                f"(length={len(response)}, preview={preview}). "
+                f"The upstream model may have timed out or the request "
+                f"context may be too large."
+            )
+        return super()._create_chat_result(response, generation_info)
