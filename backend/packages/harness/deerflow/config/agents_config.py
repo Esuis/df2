@@ -47,6 +47,11 @@ class AgentConfig(BaseModel):
     # - [] (explicit empty list): disable all skills
     # - ["skill1", "skill2"]: load only the specified skills
     skills: list[str] | None = None
+    # summarization: None (default) = use global config; non-None = per-agent override.
+    # When set, the dict is deep-merged into the global SummarizationConfig at runtime,
+    # so only the fields you want to override need to be present.
+    # Example: {"keep": {"type": "messages", "value": 5}}
+    summarization: dict[str, Any] | None = None
 
 
 def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:

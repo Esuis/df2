@@ -28,6 +28,7 @@ class AgentResponse(BaseModel):
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all, []=none)")
+    summarization: dict | None = Field(default=None, description="Optional per-agent summarization override (None=use global, dict=partial override merged at runtime)")
     soul: str | None = Field(default=None, description="SOUL.md content")
 
 
@@ -55,6 +56,7 @@ class AgentUpdateRequest(BaseModel):
     model: str | None = Field(default=None, description="Updated model override")
     tool_groups: list[str] | None = Field(default=None, description="Updated tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Updated skill whitelist (None=all, []=none)")
+    summarization: dict | None = Field(default=None, description="Updated per-agent summarization override (None=use global, dict=partial override merged at runtime)")
     soul: str | None = Field(default=None, description="Updated SOUL.md content")
 
 
@@ -100,6 +102,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
         model=agent_cfg.model,
         tool_groups=agent_cfg.tool_groups,
         skills=agent_cfg.skills,
+        summarization=agent_cfg.summarization,
         soul=soul,
     )
 
@@ -312,7 +315,7 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
         # Use model_fields_set to distinguish "field omitted" from "explicitly set to null".
         # This is critical for skills where None means "inherit all" (not "don't change").
         fields_set = request.model_fields_set
-        config_changed = bool(fields_set & {"description", "model", "tool_groups", "skills"})
+        config_changed = bool(fields_set & {"description", "model", "tool_groups", "skills", "summarization"})
 
         if config_changed:
             updated: dict = {
@@ -334,6 +337,14 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
                 new_skills = agent_cfg.skills
             if new_skills is not None:
                 updated["skills"] = new_skills
+
+            # summarization: None = use global config, non-None = partial override (deep-merged at runtime)
+            if "summarization" in fields_set:
+                new_summarization = request.summarization
+            else:
+                new_summarization = agent_cfg.summarization
+            if new_summarization is not None:
+                updated["summarization"] = new_summarization
 
             config_file = agent_dir / "config.yaml"
             with open(config_file, "w", encoding="utf-8") as f:

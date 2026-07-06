@@ -43,12 +43,12 @@ from deerflow.agents.middlewares.tool_error_handling_middleware import build_lea
 from deerflow.agents.middlewares.tool_logging_middleware import ToolLoggingMiddleware
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
-from deerflow.config.summarization_config import get_summarization_config
+from deerflow.config.summarization_config import SummarizationConfig
 from deerflow.models import create_chat_model
 from deerflow.config.paths import get_paths
 from deerflow.community.common.auth_context import get_resolved_auth, set_resolved_auth, ResolvedAuth
 
-from deerflow.config.agents_config import load_agent_config, validate_agent_name
+from deerflow.config.agents_config import AgentConfig, load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
 from deerflow.skills.types import Skill
@@ -159,10 +159,34 @@ def _resolve_model_name(requested_model_name: str | None = None, *, app_config: 
     return default_model_name
 
 
-def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> ChineseSummarizationMiddleware | None:
-    """Create and configure the summarization middleware from config."""
+def _deep_merge(base: dict, override: dict) -> None:
+    """Recursively merge *override* into *base* in-place.
+
+    Nested dicts are merged recursively; everything else (lists, scalars) is
+    replaced wholesale.  This lets an agent config override a single leaf like
+    ``keep.value`` without having to repeat the entire tree."""
+    for key, value in override.items():
+        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = value
+
+
+def _create_summarization_middleware(*, app_config: AppConfig | None = None, agent_config: AgentConfig | None = None) -> ChineseSummarizationMiddleware | None:
+    """Create and configure the summarization middleware from config.
+
+    When ``agent_config.summarization`` is set it is deep-merged into the
+    global ``app_config.summarization``, so the agent only needs to specify
+    the fields it wants to override."""
     resolved_app_config = app_config or get_app_config()
-    config = resolved_app_config.summarization
+
+    if agent_config is not None and agent_config.summarization is not None:
+        # Deep-merge agent overrides into global defaults
+        base = resolved_app_config.summarization.model_dump()
+        _deep_merge(base, agent_config.summarization)
+        config = SummarizationConfig(**base)
+    else:
+        config = resolved_app_config.summarization
 
     if not config.enabled:
         return None
@@ -360,6 +384,7 @@ def build_middlewares(
     app_config: AppConfig | None = None,
     deferred_setup=None,
     runtime_supports_vision: bool | None = None,
+    agent_config: AgentConfig | None = None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -397,7 +422,7 @@ def build_middlewares(
     middlewares.append(SkillActivationMiddleware(available_skills=available_skills, app_config=resolved_app_config))
 
     # Add summarization middleware if enabled
-    summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
+    summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config, agent_config=agent_config)
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
@@ -625,7 +650,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 available_skills=set(_BOOTSTRAP_SKILL_NAMES),
                 app_config=resolved_app_config,
                 deferred_setup=setup,
-                runtime_supports_vision=effective_supports_vision
+                runtime_supports_vision=effective_supports_vision,
+                agent_config=None,
             ),
             system_prompt=apply_prompt_template(
                 subagent_enabled=subagent_enabled,
@@ -656,7 +682,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             available_skills=available_skills,
             app_config=resolved_app_config,
             deferred_setup=setup,
-            runtime_supports_vision=effective_supports_vision
+            runtime_supports_vision=effective_supports_vision,
+            agent_config=agent_config,
         ),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,
