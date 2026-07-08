@@ -126,6 +126,42 @@ def _require_agents_api_enabled() -> None:
         )
 
 
+def _extract_user_description(update_prompt: str) -> str:
+    """从完整模板中提取用户可编辑的记忆描述部分。
+
+    完整模板中用户描述位于 ``- memory: `` 和 ``\\n\\n输出格式（JSON）：`` 之间。
+    若模板结构不匹配，原样返回。
+    """
+    marker = "- memory: "
+    end_marker = "\n\n输出格式（JSON）："
+
+    start = update_prompt.find(marker)
+    if start == -1:
+        return update_prompt
+    start += len(marker)
+
+    end = update_prompt.find(end_marker, start)
+    if end == -1:
+        return update_prompt[start:]
+
+    return update_prompt[start:end]
+
+
+def _sanitize_memory_for_response(memory: dict | None) -> dict | None:
+    """对返回给前端的 memory 配置做脱敏处理。
+
+    - 完整返回 memory 中的所有字段（包括用户自定义的无效配置）
+    - 仅对 ``update_prompt`` 字段做提取，只暴露用户可编辑的描述部分
+    """
+    if memory is None:
+        return None
+    sanitized = dict(memory)
+    raw_prompt = sanitized.get("update_prompt")
+    if isinstance(raw_prompt, str) and raw_prompt:
+        sanitized["update_prompt"] = _extract_user_description(raw_prompt)
+    return sanitized
+
+
 def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False, *, user_id: str | None = None) -> AgentResponse:
     """Convert AgentConfig to AgentResponse."""
     soul: str | None = None
@@ -139,7 +175,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
         tool_groups=agent_cfg.tool_groups,
         skills=agent_cfg.skills,
         summarization=agent_cfg.summarization,
-        memory=agent_cfg.memory,
+        memory=_sanitize_memory_for_response(agent_cfg.memory),
         soul=soul,
     )
 
