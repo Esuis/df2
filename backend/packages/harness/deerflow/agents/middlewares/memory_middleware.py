@@ -37,17 +37,20 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
 
     state_schema = MemoryMiddlewareState
 
-    def __init__(self, agent_name: str | None = None, *, memory_config: "MemoryConfig | None" = None):
+    def __init__(self, agent_name: str | None = None, *, memory_config: "MemoryConfig | None" = None, agent_memory_override: dict | None = None):
         """Initialize the MemoryMiddleware.
 
         Args:
             agent_name: If provided, memory is stored per-agent. If None, uses global memory.
             memory_config: Explicit memory config. When omitted, legacy global
                 config fallback is used.
+            agent_memory_override: Per-agent memory config dict to pass through
+                to the background MemoryUpdater.
         """
         super().__init__()
         self._agent_name = agent_name
         self._memory_config = memory_config
+        self._agent_memory_override = agent_memory_override
 
     @override
     def after_agent(self, state: MemoryMiddlewareState, runtime: Runtime) -> dict | None:
@@ -105,6 +108,7 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             user_id=user_id,
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
+            memory_config_override=self._agent_memory_override,
         )
 
         return None

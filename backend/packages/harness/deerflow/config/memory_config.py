@@ -73,6 +73,15 @@ class MemoryConfig(BaseModel):
             "CJK-aware character-based estimate and never touches tiktoken."
         ),
     )
+    update_prompt: str | None = Field(
+        default=None,
+        description=(
+            "Custom memory update prompt template. "
+            "None (default) uses the built-in MEMORY_UPDATE_PROMPT module constant. "
+            "When set, overrides the entire prompt template — the template must "
+            "include {current_memory}, {conversation}, and {correction_hint} placeholders."
+        ),
+    )
 
 
 # Global configuration instance

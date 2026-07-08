@@ -19,6 +19,40 @@ router = APIRouter(prefix="/api", tags=["agents"])
 
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
+# 硬编码默认记忆描述 —— request 未传 update_prompt 时使用
+DEFAULT_MEMORY_DESCRIPTION = (
+    "职业角色、公司、关键项目、主要技术（2-3句话）\n"
+    "  示例：核心贡献者，项目名称及指标（16k+ stars），技术栈"
+)
+
+# 完整记忆更新模板 —— {memory_description} 在 update_agent 中被替换为实际描述
+FULL_MEMORY_TEMPLATE = """你是一个记忆管理系统。你的任务是分析对话并更新用户的记忆档案。
+
+当前记忆状态：
+{current_memory}
+
+新的对话：
+{conversation}
+
+{correction_hint}
+
+记忆分段指南：
+
+**用户上下文**（当前状态 - 简洁摘要）：
+- memory: {memory_description}
+
+输出格式（JSON）：
+{{
+  "memory": {{"summary": "...", "shouldUpdate": true/false}}
+}}
+
+重要规则：
+- 仅当有有意义的新信息时才设置shouldUpdate=true
+- 聚焦于对未来交互和个性化有用的信息
+- 重要：不要在记忆中记录文件上传事件。上传的文件是会话特定的且临时的——它们在未来的会话中不可访问。记录上传事件会在后续对话中造成混淆。
+
+只返回有效的JSON，不要解释或markdown。"""
+
 
 class AgentResponse(BaseModel):
     """Response model for a custom agent."""
@@ -29,6 +63,7 @@ class AgentResponse(BaseModel):
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all, []=none)")
     summarization: dict | None = Field(default=None, description="Optional per-agent summarization override (None=use global, dict=partial override merged at runtime)")
+    memory: dict | None = Field(default=None, description="Optional per-agent memory override (None=use global, dict=partial override merged at runtime)")
     soul: str | None = Field(default=None, description="SOUL.md content")
 
 
@@ -57,6 +92,7 @@ class AgentUpdateRequest(BaseModel):
     tool_groups: list[str] | None = Field(default=None, description="Updated tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Updated skill whitelist (None=all, []=none)")
     summarization: dict | None = Field(default=None, description="Updated per-agent summarization override (None=use global, dict=partial override merged at runtime)")
+    memory: dict | None = Field(default=None, description="Updated per-agent memory override (None=use global, dict=partial override merged at runtime)")
     soul: str | None = Field(default=None, description="Updated SOUL.md content")
 
 
@@ -103,6 +139,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
         tool_groups=agent_cfg.tool_groups,
         skills=agent_cfg.skills,
         summarization=agent_cfg.summarization,
+        memory=agent_cfg.memory,
         soul=soul,
     )
 
@@ -315,7 +352,7 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
         # Use model_fields_set to distinguish "field omitted" from "explicitly set to null".
         # This is critical for skills where None means "inherit all" (not "don't change").
         fields_set = request.model_fields_set
-        config_changed = bool(fields_set & {"description", "model", "tool_groups", "skills", "summarization"})
+        config_changed = bool(fields_set & {"description", "model", "tool_groups", "skills", "summarization", "memory"})
 
         if config_changed:
             updated: dict = {
@@ -345,6 +382,17 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
                 new_summarization = agent_cfg.summarization
             if new_summarization is not None:
                 updated["summarization"] = new_summarization
+
+            # memory: None = use global config, non-None = partial override (deep-merged at runtime)
+            if "memory" in fields_set:
+                new_memory = request.memory
+            else:
+                new_memory = agent_cfg.memory
+            if new_memory is not None:
+                new_memory = dict(new_memory)
+                user_desc = new_memory.get("update_prompt") or DEFAULT_MEMORY_DESCRIPTION
+                new_memory["update_prompt"] = FULL_MEMORY_TEMPLATE.replace("{memory_description}", user_desc)
+                updated["memory"] = new_memory
 
             config_file = agent_dir / "config.yaml"
             with open(config_file, "w", encoding="utf-8") as f:

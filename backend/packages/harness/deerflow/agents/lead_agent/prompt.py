@@ -14,6 +14,7 @@ from deerflow.tools.builtins.tool_search import get_deferred_tools_prompt_sectio
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
+    from deerflow.config.memory_config import MemoryConfig
 
 logger = logging.getLogger(__name__)
 
@@ -580,13 +581,16 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 """
 
 
-def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig | None = None) -> str:
+def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig | None = None, memory_config: MemoryConfig | None = None) -> str:
     """Get memory context for injection into system prompt.
 
     Args:
         agent_name: If provided, loads per-agent memory. If None, loads global memory.
         app_config: Explicit application config. When provided, memory options
             are read from this value instead of the global config singleton.
+        memory_config: Pre-resolved (merged) memory config. When provided,
+            takes precedence over ``app_config.memory`` and the global singleton.
+            Used by DynamicContextMiddleware to pass per-agent overrides.
 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
@@ -595,7 +599,9 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
         from deerflow.agents.memory import format_memory_for_injection, get_memory_data
         from deerflow.runtime.user_context import get_effective_user_id
 
-        if app_config is None:
+        if memory_config is not None:
+            config = memory_config
+        elif app_config is None:
             from deerflow.config.memory_config import get_memory_config
 
             config = get_memory_config()

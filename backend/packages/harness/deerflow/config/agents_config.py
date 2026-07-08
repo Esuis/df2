@@ -52,6 +52,11 @@ class AgentConfig(BaseModel):
     # so only the fields you want to override need to be present.
     # Example: {"keep": {"type": "messages", "value": 5}}
     summarization: dict[str, Any] | None = None
+    # memory: None (default) = use global config; non-None = per-agent override.
+    # When set, the dict is deep-merged into the global MemoryConfig at runtime,
+    # so only the fields you want to override need to be present.
+    # Example: {"enabled": false} to disable memory for this agent.
+    memory: dict[str, Any] | None = None
 
 
 def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:

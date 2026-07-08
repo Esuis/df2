@@ -43,6 +43,7 @@ from deerflow.agents.middlewares.tool_error_handling_middleware import build_lea
 from deerflow.agents.middlewares.tool_logging_middleware import ToolLoggingMiddleware
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
+from deerflow.config.memory_config import MemoryConfig
 from deerflow.config.summarization_config import SummarizationConfig
 from deerflow.models import create_chat_model
 from deerflow.config.paths import get_paths
@@ -170,6 +171,19 @@ def _deep_merge(base: dict, override: dict) -> None:
             _deep_merge(base[key], value)
         else:
             base[key] = value
+
+
+def _resolve_memory_config(*, app_config: AppConfig, agent_config: AgentConfig | None) -> MemoryConfig:
+    """Return the effective MemoryConfig for an agent.
+
+    When ``agent_config.memory`` is set it is deep-merged into the global
+    ``app_config.memory``, so the agent only needs to specify the fields it
+    wants to override."""
+    if agent_config is not None and agent_config.memory is not None:
+        base = app_config.memory.model_dump()
+        _deep_merge(base, agent_config.memory)
+        return MemoryConfig(**base)
+    return app_config.memory
 
 
 def _create_summarization_middleware(*, app_config: AppConfig | None = None, agent_config: AgentConfig | None = None) -> ChineseSummarizationMiddleware | None:
@@ -406,13 +420,14 @@ def build_middlewares(
         List of middleware instances.
     """
     resolved_app_config = app_config or get_app_config()
+    resolved_memory_config = _resolve_memory_config(app_config=resolved_app_config, agent_config=agent_config)
     middlewares = build_lead_runtime_middlewares(app_config=resolved_app_config, lazy_init=True)
 
     # Always inject current date (and optionally memory) as <system-reminder> into the
     # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
 
-    middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
+    middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config, memory_config=resolved_memory_config))
 
     # Deterministically load a full SKILL.md when the user starts the turn with
     # /skill-name. This keeps the base system prompt metadata-only while giving
@@ -441,7 +456,7 @@ def build_middlewares(
     middlewares.append(TitleMiddleware(app_config=resolved_app_config))
 
     # Add MemoryMiddleware (after TitleMiddleware)
-    middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
+    middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_memory_config, agent_memory_override=agent_config.memory if agent_config else None))
 
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.

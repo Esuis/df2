@@ -377,6 +377,38 @@ def _fact_content_key(content: Any) -> str | None:
     return stripped.casefold()
 
 
+def _deep_merge_memory(base: dict, override: dict) -> None:
+    """Recursively merge *override* into *base* in-place.
+
+    Same semantics as ``_deep_merge`` in agent.py but duplicated here to avoid
+    a cross-package dependency from the memory module to the lead_agent module."""
+    for key, value in override.items():
+        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+            _deep_merge_memory(base[key], value)
+        else:
+            base[key] = value
+
+
+def _resolve_memory_config(override: dict | None = None) -> "MemoryConfig":
+    """Return effective MemoryConfig with optional override deep-merged.
+
+    Args:
+        override: Per-agent memory config dict, or None to use global as-is.
+
+    Returns:
+        MemoryConfig instance. A copy of global config with overrides merged in.
+    """
+    from deerflow.config.memory_config import MemoryConfig
+
+    config = get_memory_config()
+    if not override:
+        return config
+
+    base = config.model_dump()
+    _deep_merge_memory(base, override)
+    return MemoryConfig(**base)
+
+
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
@@ -388,9 +420,9 @@ class MemoryUpdater:
         """
         self._model_name = model_name
 
-    def _get_model(self):
+    def _get_model(self, memory_config_override: dict | None = None):
         """Get the model for memory updates."""
-        config = get_memory_config()
+        config = _resolve_memory_config(memory_config_override)
         model_name = self._model_name or config.model_name
         return create_chat_model(name=model_name, thinking_enabled=False)
 
@@ -426,9 +458,10 @@ class MemoryUpdater:
         correction_detected: bool,
         reinforcement_detected: bool,
         user_id: str | None = None,
+        memory_config_override: dict | None = None,
     ) -> tuple[dict[str, Any], str] | None:
         """Load memory and build the update prompt for a conversation."""
-        config = get_memory_config()
+        config = _resolve_memory_config(memory_config_override)
         if not config.enabled or not messages:
             return None
 
@@ -441,7 +474,8 @@ class MemoryUpdater:
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
         )
-        prompt = MEMORY_UPDATE_PROMPT.format(
+        prompt_template = config.update_prompt or MEMORY_UPDATE_PROMPT
+        prompt = prompt_template.format(
             current_memory=json.dumps(current_memory, indent=2, ensure_ascii=False),
             conversation=conversation_text,
             correction_hint=correction_hint,
@@ -455,12 +489,13 @@ class MemoryUpdater:
         thread_id: str | None,
         agent_name: str | None,
         user_id: str | None = None,
+        memory_config_override: dict | None = None,
     ) -> bool:
         """Parse the model response, apply updates, and persist memory."""
         update_data = _parse_memory_update_response(response_content)
         # Deep-copy before in-place mutation so a subsequent save() failure
         # cannot corrupt the still-cached original object reference.
-        updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id)
+        updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id, memory_config_override=memory_config_override)
         updated_memory = _strip_upload_mentions_from_memory(updated_memory)
         return get_memory_storage().save(updated_memory, agent_name, user_id=user_id)
 
@@ -472,6 +507,7 @@ class MemoryUpdater:
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         user_id: str | None = None,
+        memory_config_override: dict | None = None,
     ) -> bool:
         """Update memory asynchronously by delegating to the sync path.
 
@@ -489,6 +525,7 @@ class MemoryUpdater:
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
             user_id=user_id,
+            memory_config_override=memory_config_override,
         )
 
     def _do_update_memory_sync(
@@ -499,6 +536,7 @@ class MemoryUpdater:
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         user_id: str | None = None,
+        memory_config_override: dict | None = None,
     ) -> bool:
         """Pure-sync memory update using ``model.invoke()``.
 
@@ -515,12 +553,13 @@ class MemoryUpdater:
                 correction_detected=correction_detected,
                 reinforcement_detected=reinforcement_detected,
                 user_id=user_id,
+                memory_config_override=memory_config_override,
             )
             if prepared is None:
                 return False
 
             current_memory, prompt = prepared
-            model = self._get_model()
+            model = self._get_model(memory_config_override=memory_config_override)
             response = model.invoke(prompt, config={"run_name": "memory_agent"})
             return self._finalize_update(
                 current_memory=current_memory,
@@ -528,6 +567,7 @@ class MemoryUpdater:
                 thread_id=thread_id,
                 agent_name=agent_name,
                 user_id=user_id,
+                memory_config_override=memory_config_override,
             )
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse LLM response for memory update: %s", e)
@@ -544,6 +584,7 @@ class MemoryUpdater:
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
         user_id: str | None = None,
+        memory_config_override: dict | None = None,
     ) -> bool:
         """Synchronously update memory using the sync LLM path.
 
@@ -563,6 +604,7 @@ class MemoryUpdater:
             correction_detected: Whether recent turns include an explicit correction signal.
             reinforcement_detected: Whether recent turns include a positive reinforcement signal.
             user_id: If provided, scopes memory to a specific user.
+            memory_config_override: Per-agent memory config dict.
 
         Returns:
             True if update was successful, False otherwise.
@@ -582,6 +624,7 @@ class MemoryUpdater:
                     correction_detected=correction_detected,
                     reinforcement_detected=reinforcement_detected,
                     user_id=user_id,
+                    memory_config_override=memory_config_override,
                 )
                 return future.result()
             except Exception:
@@ -595,6 +638,7 @@ class MemoryUpdater:
             correction_detected=correction_detected,
             reinforcement_detected=reinforcement_detected,
             user_id=user_id,
+            memory_config_override=memory_config_override,
         )
 
     def _apply_updates(
@@ -602,6 +646,7 @@ class MemoryUpdater:
         current_memory: dict[str, Any],
         update_data: dict[str, Any],
         thread_id: str | None = None,
+        memory_config_override: dict | None = None,
     ) -> dict[str, Any]:
         """Apply LLM-generated updates to memory.
 
@@ -609,11 +654,12 @@ class MemoryUpdater:
             current_memory: Current memory data.
             update_data: Updates from LLM.
             thread_id: Optional thread ID for tracking.
+            memory_config_override: Per-agent memory config dict.
 
         Returns:
             Updated memory data.
         """
-        config = get_memory_config()
+        config = _resolve_memory_config(memory_config_override)
         now = utc_now_iso_z()
 
         # Update user sections

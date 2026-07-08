@@ -23,6 +23,9 @@ class ConversationContext:
     user_id: str | None = None
     correction_detected: bool = False
     reinforcement_detected: bool = False
+    # memory_config_override: per-agent memory config dict to deep-merge into
+    # global MemoryConfig at processing time. None = use global config as-is.
+    memory_config_override: dict | None = None
 
 
 class MemoryUpdateQueue:
@@ -49,6 +52,17 @@ class MemoryUpdateQueue:
         """Return the debounce identity for a memory update target."""
         return (thread_id, user_id, agent_name)
 
+    @staticmethod
+    def _resolve_enabled(memory_config_override: dict | None = None) -> bool:
+        """Return whether memory is enabled, respecting per-agent override.
+
+        When ``memory_config_override`` explicitly sets ``enabled``, it wins;
+        otherwise the global config is used.
+        """
+        if memory_config_override is not None and "enabled" in memory_config_override:
+            return bool(memory_config_override["enabled"])
+        return get_memory_config().enabled
+
     def add(
         self,
         thread_id: str,
@@ -57,6 +71,7 @@ class MemoryUpdateQueue:
         user_id: str | None = None,
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
+        memory_config_override: dict | None = None,
     ) -> None:
         """Add a conversation to the update queue.
 
@@ -69,9 +84,9 @@ class MemoryUpdateQueue:
                 raw threads).
             correction_detected: Whether recent turns include an explicit correction signal.
             reinforcement_detected: Whether recent turns include a positive reinforcement signal.
+            memory_config_override: Per-agent memory config dict. None uses global as-is.
         """
-        config = get_memory_config()
-        if not config.enabled:
+        if not self._resolve_enabled(memory_config_override):
             return
 
         with self._lock:
@@ -82,6 +97,7 @@ class MemoryUpdateQueue:
                 user_id=user_id,
                 correction_detected=correction_detected,
                 reinforcement_detected=reinforcement_detected,
+                memory_config_override=memory_config_override,
             )
             self._reset_timer()
 
@@ -95,10 +111,10 @@ class MemoryUpdateQueue:
         user_id: str | None = None,
         correction_detected: bool = False,
         reinforcement_detected: bool = False,
+        memory_config_override: dict | None = None,
     ) -> None:
         """Add a conversation and start processing immediately in the background."""
-        config = get_memory_config()
-        if not config.enabled:
+        if not self._resolve_enabled(memory_config_override):
             return
 
         with self._lock:
@@ -109,6 +125,7 @@ class MemoryUpdateQueue:
                 user_id=user_id,
                 correction_detected=correction_detected,
                 reinforcement_detected=reinforcement_detected,
+                memory_config_override=memory_config_override,
             )
             self._schedule_timer(0)
 
@@ -123,6 +140,7 @@ class MemoryUpdateQueue:
         user_id: str | None,
         correction_detected: bool,
         reinforcement_detected: bool,
+        memory_config_override: dict | None = None,
     ) -> None:
         queue_key = self._queue_key(thread_id, user_id, agent_name)
         existing_context = next(
@@ -138,6 +156,7 @@ class MemoryUpdateQueue:
             user_id=user_id,
             correction_detected=merged_correction_detected,
             reinforcement_detected=merged_reinforcement_detected,
+            memory_config_override=memory_config_override,
         )
 
         self._queue = [context for context in self._queue if self._queue_key(context.thread_id, context.user_id, context.agent_name) != queue_key]
@@ -197,6 +216,7 @@ class MemoryUpdateQueue:
                         correction_detected=context.correction_detected,
                         reinforcement_detected=context.reinforcement_detected,
                         user_id=context.user_id,
+                        memory_config_override=context.memory_config_override,
                     )
                     if success:
                         logger.info("Memory updated successfully for thread %s", context.thread_id)

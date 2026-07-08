@@ -43,6 +43,7 @@ from langgraph.runtime import Runtime
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
+    from deerflow.config.memory_config import MemoryConfig
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ logger = logging.getLogger(__name__)
 _INJECT_TIMEOUT_SECONDS = 5.0
 
 _DATE_RE = re.compile(r"<current_date>([^<]+)</current_date>")
+_REMINDER_DATE_KEY = "reminder_date"
 _DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
 _SUMMARY_MESSAGE_NAME = "summary"
 
@@ -77,11 +79,27 @@ def _last_injected_date(messages: list) -> str | None:
     Detection uses the ``dynamic_context_reminder`` additional_kwargs flag rather
     than content substring matching, so user messages containing ``<system-reminder>``
     are not mistakenly treated as injected reminders.
+
+    The authoritative date is the ``reminder_date`` value in additional_kwargs of
+    the date SystemMessage. Reminders without it (the separate ``<memory>``
+    HumanMessage, or any future dateless reminder) carry no date and are skipped,
+    so they cannot shadow the real date reminder.
     """
     for msg in reversed(messages):
-        if is_dynamic_context_reminder(msg):
+        if not is_dynamic_context_reminder(msg):
+            continue
+        structured = msg.additional_kwargs.get(_REMINDER_DATE_KEY)
+        if isinstance(structured, str) and structured:
+            return structured
+        # Backward-compat for checkpoints written before reminder_date existed:
+        # the date lived in content. Scope the regex to SystemMessage so it never
+        # runs on the user-influenceable memory HumanMessage (preserves the OWASP
+        # role separation from #3630 and closes the memory date-spoofing hole).
+        if isinstance(msg, SystemMessage):
             content_str = msg.content if isinstance(msg.content, str) else str(msg.content)
-            return _extract_date(content_str)
+            date = _extract_date(content_str)
+            if date is not None:
+                return date
     return None
 
 
@@ -108,10 +126,11 @@ class DynamicContextMiddleware(AgentMiddleware):
     day see the corrected date in history and skip re-injection.
     """
 
-    def __init__(self, agent_name: str | None = None, *, app_config: AppConfig | None = None):
+    def __init__(self, agent_name: str | None = None, *, app_config: AppConfig | None = None, memory_config: "MemoryConfig | None" = None):
         super().__init__()
         self._agent_name = agent_name
         self._app_config = app_config
+        self._memory_config = memory_config
 
     def _build_full_reminder(self) -> tuple[str, str | None]:
         """Return (date_reminder, memory_block | None).
@@ -123,8 +142,13 @@ class DynamicContextMiddleware(AgentMiddleware):
         """
         from deerflow.agents.lead_agent.prompt import _get_memory_context
 
-        injection_enabled = self._app_config.memory.injection_enabled if self._app_config else True
-        memory_context = _get_memory_context(self._agent_name, app_config=self._app_config) if injection_enabled else ""
+        if self._memory_config is not None:
+            injection_enabled = self._memory_config.injection_enabled
+        elif self._app_config is not None:
+            injection_enabled = self._app_config.memory.injection_enabled
+        else:
+            injection_enabled = True
+        memory_context = _get_memory_context(self._agent_name, app_config=self._app_config, memory_config=self._memory_config) if injection_enabled else ""
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
 
         date_reminder = "\n".join(
@@ -168,12 +192,16 @@ class DynamicContextMiddleware(AgentMiddleware):
         """
         stable_id = original.id or str(uuid.uuid4())
         messages: list[SystemMessage | HumanMessage] = []
+        # Extract the date from the reminder content so it can be stored
+        # as structured metadata for cheap, spoofing-resistant lookups.
+        injected_date = _extract_date(reminder_content)
+        date_kwargs = {_REMINDER_DATE_KEY: injected_date} if injected_date else {}
 
         messages.append(
             SystemMessage(
                 content=reminder_content,
                 id=stable_id,
-                additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+                additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True, **date_kwargs},
             )
         )
 
