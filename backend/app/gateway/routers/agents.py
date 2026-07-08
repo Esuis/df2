@@ -26,7 +26,7 @@ DEFAULT_MEMORY_DESCRIPTION = (
 )
 
 # 完整记忆更新模板 —— {memory_description} 在 update_agent 中被替换为实际描述
-FULL_MEMORY_TEMPLATE = """你是一个记忆管理系统。你的任务是分析对话并更新用户的记忆档案。
+FULL_MEMORY_TEMPLATE = """你是一个记忆管理系统。你的任务是分析对话并更新场景的记忆档案。
 
 当前记忆状态：
 {current_memory}
@@ -38,7 +38,7 @@ FULL_MEMORY_TEMPLATE = """你是一个记忆管理系统。你的任务是分析
 
 记忆分段指南：
 
-**用户上下文**（当前状态 - 简洁摘要）：
+**场景上下文**（当前状态 - 简洁摘要）：
 - memory: {memory_description}
 
 输出格式（JSON）：

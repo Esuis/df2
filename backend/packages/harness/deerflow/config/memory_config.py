@@ -33,24 +33,12 @@ class MemoryConfig(BaseModel):
     debounce_seconds: int = Field(
         default=30,
         ge=1,
-        le=300,
+        le=30000,
         description="Seconds to wait before processing queued updates (debounce)",
     )
     model_name: str | None = Field(
         default=None,
         description="Model name to use for memory updates (None = use default model)",
-    )
-    max_facts: int = Field(
-        default=100,
-        ge=10,
-        le=500,
-        description="Maximum number of facts to store",
-    )
-    fact_confidence_threshold: float = Field(
-        default=0.7,
-        ge=0.0,
-        le=1.0,
-        description="Minimum confidence threshold for storing facts",
     )
     injection_enabled: bool = Field(
         default=True,

@@ -26,17 +26,7 @@ def create_empty_memory() -> dict[str, Any]:
     return {
         "version": "1.0",
         "lastUpdated": utc_now_iso_z(),
-        "user": {
-            "workContext": {"summary": "", "updatedAt": ""},
-            "personalContext": {"summary": "", "updatedAt": ""},
-            "topOfMind": {"summary": "", "updatedAt": ""},
-        },
-        "history": {
-            "recentMonths": {"summary": "", "updatedAt": ""},
-            "earlierContext": {"summary": "", "updatedAt": ""},
-            "longTermBackground": {"summary": "", "updatedAt": ""},
-        },
-        "facts": [],
+        "memory": {"summary": "", "updatedAt": ""},
     }
 
 

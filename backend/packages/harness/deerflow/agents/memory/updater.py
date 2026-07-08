@@ -227,7 +227,7 @@ def _extract_text(content: Any) -> str:
     return str(content)
 
 
-_REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS = frozenset({"user", "history", "newFacts", "factsToRemove"})
+_REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS = frozenset({"memory"})
 
 
 def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
@@ -280,33 +280,32 @@ def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
 
 def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]:
     """Coerce parsed memory update data into the shape consumed by _apply_updates."""
-    user = update_data.get("user")
-    history = update_data.get("history")
-    new_facts = update_data.get("newFacts")
-    facts_to_remove = update_data.get("factsToRemove")
-    normalized_facts_to_remove = [fact_id for fact_id in facts_to_remove if isinstance(fact_id, str)] if isinstance(facts_to_remove, list) else []
-    normalized_new_facts = []
-    dropped_new_fact = not isinstance(new_facts, list)
-    if isinstance(new_facts, list):
-        for fact in new_facts:
-            normalized_fact = _normalize_memory_update_fact(fact)
-            if normalized_fact is not None:
-                normalized_new_facts.append(normalized_fact)
-            else:
-                dropped_new_fact = True
-
-    if normalized_facts_to_remove and dropped_new_fact:
+    memory = update_data.get("memory")
+    if not isinstance(memory, dict):
         raise json.JSONDecodeError(
-            "Unsafe partial memory update: factsToRemove with malformed newFacts",
+            "Missing or invalid 'memory' field",
+            json.dumps(update_data, ensure_ascii=False),
+            0,
+        )
+
+    should_update = memory.get("shouldUpdate", False)
+    if isinstance(should_update, str):
+        should_update = should_update.strip().lower() in ("true", "yes", "1")
+    should_update = bool(should_update)
+
+    summary = memory.get("summary", "")
+    if should_update and (not isinstance(summary, str) or not summary.strip()):
+        raise json.JSONDecodeError(
+            "'memory.summary' must be a non-empty string when shouldUpdate is true",
             json.dumps(update_data, ensure_ascii=False),
             0,
         )
 
     return {
-        "user": user if isinstance(user, dict) else {},
-        "history": history if isinstance(history, dict) else {},
-        "newFacts": normalized_new_facts,
-        "factsToRemove": normalized_facts_to_remove,
+        "memory": {
+            "summary": summary.strip() if isinstance(summary, str) else "",
+            "shouldUpdate": should_update,
+        }
     }
 
 
@@ -346,24 +345,16 @@ _UPLOAD_SENTENCE_RE = re.compile(
 
 
 def _strip_upload_mentions_from_memory(memory_data: dict[str, Any]) -> dict[str, Any]:
-    """Remove sentences about file uploads from all memory summaries and facts.
+    """Remove sentences about file uploads from memory summary.
 
     Uploaded files are session-scoped; persisting upload events in long-term
     memory causes the agent to search for non-existent files in future sessions.
     """
-    # Scrub summaries in user/history sections
-    for section in ("user", "history"):
-        section_data = memory_data.get(section, {})
-        for _key, val in section_data.items():
-            if isinstance(val, dict) and "summary" in val:
-                cleaned = _UPLOAD_SENTENCE_RE.sub("", val["summary"]).strip()
-                cleaned = re.sub(r"  +", " ", cleaned)
-                val["summary"] = cleaned
-
-    # Also remove any facts that describe upload events
-    facts = memory_data.get("facts", [])
-    if facts:
-        memory_data["facts"] = [f for f in facts if not _UPLOAD_SENTENCE_RE.search(f.get("content", ""))]
+    mem = memory_data.get("memory")
+    if isinstance(mem, dict) and "summary" in mem:
+        cleaned = _UPLOAD_SENTENCE_RE.sub("", mem["summary"]).strip()
+        cleaned = re.sub(r"  +", " ", cleaned)
+        mem["summary"] = cleaned
 
     return memory_data
 
@@ -659,73 +650,15 @@ class MemoryUpdater:
         Returns:
             Updated memory data.
         """
-        config = _resolve_memory_config(memory_config_override)
         now = utc_now_iso_z()
 
-        # Update user sections
-        user_updates = update_data.get("user", {})
-        for section in ["workContext", "personalContext", "topOfMind"]:
-            section_data = user_updates.get(section, {})
-            if section_data.get("shouldUpdate") and section_data.get("summary"):
-                current_memory["user"][section] = {
-                    "summary": section_data["summary"],
-                    "updatedAt": now,
-                }
-
-        # Update history sections
-        history_updates = update_data.get("history", {})
-        for section in ["recentMonths", "earlierContext", "longTermBackground"]:
-            section_data = history_updates.get(section, {})
-            if section_data.get("shouldUpdate") and section_data.get("summary"):
-                current_memory["history"][section] = {
-                    "summary": section_data["summary"],
-                    "updatedAt": now,
-                }
-
-        # Remove facts
-        facts_to_remove = set(update_data.get("factsToRemove", []))
-        if facts_to_remove:
-            current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in facts_to_remove]
-
-        # Add new facts
-        existing_fact_keys = {fact_key for fact_key in (_fact_content_key(fact.get("content")) for fact in current_memory.get("facts", [])) if fact_key is not None}
-        new_facts = update_data.get("newFacts", [])
-        for fact in new_facts:
-            confidence = fact.get("confidence", 0.5)
-            if confidence >= config.fact_confidence_threshold:
-                raw_content = fact.get("content", "")
-                if not isinstance(raw_content, str):
-                    continue
-                normalized_content = raw_content.strip()
-                fact_key = _fact_content_key(normalized_content)
-                if fact_key is not None and fact_key in existing_fact_keys:
-                    continue
-
-                fact_entry = {
-                    "id": f"fact_{uuid.uuid4().hex[:8]}",
-                    "content": normalized_content,
-                    "category": fact.get("category", "context"),
-                    "confidence": confidence,
-                    "createdAt": now,
-                    "source": thread_id or "unknown",
-                }
-                source_error = fact.get("sourceError")
-                if isinstance(source_error, str):
-                    normalized_source_error = source_error.strip()
-                    if normalized_source_error:
-                        fact_entry["sourceError"] = normalized_source_error
-                current_memory["facts"].append(fact_entry)
-                if fact_key is not None:
-                    existing_fact_keys.add(fact_key)
-
-        # Enforce max facts limit
-        if len(current_memory["facts"]) > config.max_facts:
-            # Sort by confidence and keep top ones
-            current_memory["facts"] = sorted(
-                current_memory["facts"],
-                key=lambda f: f.get("confidence", 0),
-                reverse=True,
-            )[: config.max_facts]
+        mem = update_data.get("memory", {})
+        summary = mem.get("summary", "")
+        if mem.get("shouldUpdate") and isinstance(summary, str) and summary.strip():
+            current_memory["memory"] = {
+                "summary": summary.strip(),
+                "updatedAt": now,
+            }
 
         return current_memory
 

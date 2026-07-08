@@ -6,12 +6,9 @@ from pydantic import BaseModel, Field
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from deerflow.agents.memory.updater import (
     clear_memory_data,
-    create_memory_fact,
-    delete_memory_fact,
     get_memory_data,
     import_memory_data,
     reload_memory_data,
-    update_memory_fact,
 )
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import make_safe_user_id
@@ -43,38 +40,17 @@ def _resolve_memory_user_id(request: Request) -> str:
 
 
 class ContextSection(BaseModel):
-    """Model for context sections (user and history)."""
+    """Model for context sections."""
 
     summary: str = Field(default="", description="Summary content")
     updatedAt: str = Field(default="", description="Last update timestamp")
 
 
-class UserContext(BaseModel):
-    """Model for user context."""
+class MemorySection(BaseModel):
+    """Model for single-section memory."""
 
-    workContext: ContextSection = Field(default_factory=ContextSection)
-    personalContext: ContextSection = Field(default_factory=ContextSection)
-    topOfMind: ContextSection = Field(default_factory=ContextSection)
-
-
-class HistoryContext(BaseModel):
-    """Model for history context."""
-
-    recentMonths: ContextSection = Field(default_factory=ContextSection)
-    earlierContext: ContextSection = Field(default_factory=ContextSection)
-    longTermBackground: ContextSection = Field(default_factory=ContextSection)
-
-
-class Fact(BaseModel):
-    """Model for a memory fact."""
-
-    id: str = Field(..., description="Unique identifier for the fact")
-    content: str = Field(..., description="Fact content")
-    category: str = Field(default="context", description="Fact category")
-    confidence: float = Field(default=0.5, description="Confidence score (0-1)")
-    createdAt: str = Field(default="", description="Creation timestamp")
-    source: str = Field(default="unknown", description="Source thread ID")
-    sourceError: str | None = Field(default=None, description="Optional description of the prior mistake or wrong approach")
+    summary: str = Field(default="", description="Memory summary")
+    updatedAt: str = Field(default="", description="Last update timestamp")
 
 
 class MemoryResponse(BaseModel):
@@ -82,34 +58,9 @@ class MemoryResponse(BaseModel):
 
     version: str = Field(default="1.0", description="Memory schema version")
     lastUpdated: str = Field(default="", description="Last update timestamp")
-    user: UserContext = Field(default_factory=UserContext)
-    history: HistoryContext = Field(default_factory=HistoryContext)
-    facts: list[Fact] = Field(default_factory=list)
+    memory: MemorySection = Field(default_factory=MemorySection)
 
 
-def _map_memory_fact_value_error(exc: ValueError) -> HTTPException:
-    """Convert updater validation errors into stable API responses."""
-    if exc.args and exc.args[0] == "confidence":
-        detail = "Invalid confidence value; must be between 0 and 1."
-    else:
-        detail = "Memory fact content cannot be empty."
-    return HTTPException(status_code=400, detail=detail)
-
-
-class FactCreateRequest(BaseModel):
-    """Request model for creating a memory fact."""
-
-    content: str = Field(..., min_length=1, description="Fact content")
-    category: str = Field(default="context", description="Fact category")
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="Confidence score (0-1)")
-
-
-class FactPatchRequest(BaseModel):
-    """PATCH request model that preserves existing values for omitted fields."""
-
-    content: str | None = Field(default=None, min_length=1, description="Fact content")
-    category: str | None = Field(default=None, description="Fact category")
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="Confidence score (0-1)")
 
 
 class MemoryConfigResponse(BaseModel):
@@ -118,8 +69,6 @@ class MemoryConfigResponse(BaseModel):
     enabled: bool = Field(..., description="Whether memory is enabled")
     storage_path: str = Field(..., description="Path to memory storage file")
     debounce_seconds: int = Field(..., description="Debounce time for memory updates")
-    max_facts: int = Field(..., description="Maximum number of facts to store")
-    fact_confidence_threshold: float = Field(..., description="Minimum confidence threshold for facts")
     injection_enabled: bool = Field(..., description="Whether memory injection is enabled")
     max_injection_tokens: int = Field(..., description="Maximum tokens for memory injection")
     token_counting: str = Field(..., description="Token counting strategy for memory injection ('tiktoken' or 'char')")
@@ -150,26 +99,10 @@ async def get_memory(http_request: Request) -> MemoryResponse:
         {
             "version": "1.0",
             "lastUpdated": "2024-01-15T10:30:00Z",
-            "user": {
-                "workContext": {"summary": "Working on DeerFlow project", "updatedAt": "..."},
-                "personalContext": {"summary": "Prefers concise responses", "updatedAt": "..."},
-                "topOfMind": {"summary": "Building memory API", "updatedAt": "..."}
-            },
-            "history": {
-                "recentMonths": {"summary": "Recent development activities", "updatedAt": "..."},
-                "earlierContext": {"summary": "", "updatedAt": ""},
-                "longTermBackground": {"summary": "", "updatedAt": ""}
-            },
-            "facts": [
-                {
-                    "id": "fact_abc123",
-                    "content": "User prefers TypeScript over JavaScript",
-                    "category": "preference",
-                    "confidence": 0.9,
-                    "createdAt": "2024-01-15T10:30:00Z",
-                    "source": "thread_xyz"
-                }
-            ]
+            "memory": {
+                "summary": "用户是后端开发者，使用 Python 和 LangGraph",
+                "updatedAt": "2024-01-15T10:30:00Z"
+            }
         }
         ```
     """
@@ -214,74 +147,6 @@ async def clear_memory(http_request: Request) -> MemoryResponse:
     return MemoryResponse(**memory_data)
 
 
-@router.post(
-    "/memory/facts",
-    response_model=MemoryResponse,
-    response_model_exclude_none=True,
-    summary="Create Memory Fact",
-    description="Create a single saved memory fact manually.",
-)
-async def create_memory_fact_endpoint(request: FactCreateRequest, http_request: Request) -> MemoryResponse:
-    """Create a single fact manually."""
-    try:
-        memory_data = create_memory_fact(
-            content=request.content,
-            category=request.category,
-            confidence=request.confidence,
-            user_id=_resolve_memory_user_id(http_request),
-        )
-    except ValueError as exc:
-        raise _map_memory_fact_value_error(exc) from exc
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail="Failed to create memory fact.") from exc
-
-    return MemoryResponse(**memory_data)
-
-
-@router.delete(
-    "/memory/facts/{fact_id}",
-    response_model=MemoryResponse,
-    response_model_exclude_none=True,
-    summary="Delete Memory Fact",
-    description="Delete a single saved memory fact by its fact id.",
-)
-async def delete_memory_fact_endpoint(fact_id: str, http_request: Request) -> MemoryResponse:
-    """Delete a single fact from memory by fact id."""
-    try:
-        memory_data = delete_memory_fact(fact_id, user_id=_resolve_memory_user_id(http_request))
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Memory fact '{fact_id}' not found.") from exc
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail="Failed to delete memory fact.") from exc
-
-    return MemoryResponse(**memory_data)
-
-
-@router.patch(
-    "/memory/facts/{fact_id}",
-    response_model=MemoryResponse,
-    response_model_exclude_none=True,
-    summary="Patch Memory Fact",
-    description="Partially update a single saved memory fact by its fact id while preserving omitted fields.",
-)
-async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, http_request: Request) -> MemoryResponse:
-    """Partially update a single fact manually."""
-    try:
-        memory_data = update_memory_fact(
-            fact_id=fact_id,
-            content=request.content,
-            category=request.category,
-            confidence=request.confidence,
-            user_id=_resolve_memory_user_id(http_request),
-        )
-    except ValueError as exc:
-        raise _map_memory_fact_value_error(exc) from exc
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Memory fact '{fact_id}' not found.") from exc
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail="Failed to update memory fact.") from exc
-
-    return MemoryResponse(**memory_data)
 
 
 @router.get(
@@ -332,8 +197,6 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
             "enabled": true,
             "storage_path": ".deer-flow/memory.json",
             "debounce_seconds": 30,
-            "max_facts": 100,
-            "fact_confidence_threshold": 0.7,
             "injection_enabled": true,
             "max_injection_tokens": 2000,
             "token_counting": "tiktoken"
@@ -345,8 +208,6 @@ async def get_memory_config_endpoint() -> MemoryConfigResponse:
         enabled=config.enabled,
         storage_path=config.storage_path,
         debounce_seconds=config.debounce_seconds,
-        max_facts=config.max_facts,
-        fact_confidence_threshold=config.fact_confidence_threshold,
         injection_enabled=config.injection_enabled,
         max_injection_tokens=config.max_injection_tokens,
         token_counting=config.token_counting,
@@ -374,8 +235,6 @@ async def get_memory_status(http_request: Request) -> MemoryStatusResponse:
             enabled=config.enabled,
             storage_path=config.storage_path,
             debounce_seconds=config.debounce_seconds,
-            max_facts=config.max_facts,
-            fact_confidence_threshold=config.fact_confidence_threshold,
             injection_enabled=config.injection_enabled,
             max_injection_tokens=config.max_injection_tokens,
             token_counting=config.token_counting,
