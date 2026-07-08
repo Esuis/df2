@@ -506,6 +506,9 @@ def build_middlewares(
     if safety_config.enabled:
         middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
 
+    # ToolLoggingMiddleware — log tool calls to the run journal for debugging
+    middlewares.append(ToolLoggingMiddleware())
+
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
     return middlewares
