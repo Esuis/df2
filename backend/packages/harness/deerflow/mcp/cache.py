@@ -79,7 +79,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         return _mcp_tools_cache
 
 
-def get_cached_mcp_tools() -> list[BaseTool]:
+def get_cached_mcp_tools(*, thread_id: str | None = None) -> list[BaseTool]:
     """Get cached MCP tools with lazy initialization.
 
     If tools are not initialized, automatically initializes them.
@@ -96,11 +96,11 @@ def get_cached_mcp_tools() -> list[BaseTool]:
 
     # Check if cache is stale due to config file changes
     if _is_cache_stale():
-        logger.info("MCP cache is stale, resetting for re-initialization...")
+        logger.debug("[thread=%s] MCP cache is stale, resetting for re-initialization...", thread_id)
         reset_mcp_tools_cache()
 
     if not _cache_initialized:
-        logger.info("MCP tools not initialized, performing lazy initialization...")
+        logger.debug("[thread=%s] MCP tools not initialized, performing lazy initialization...", thread_id)
         try:
             # Try to initialize in the current event loop
             loop = asyncio.get_event_loop()
@@ -109,22 +109,31 @@ def get_cached_mcp_tools() -> list[BaseTool]:
                 # we need to create a new loop in a thread
                 import concurrent.futures
 
+                logger.debug("[thread=%s] MCP lazy init: event loop is running, using ThreadPoolExecutor (future.result will block until MCP connects)...", thread_id)
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     future = executor.submit(asyncio.run, initialize_mcp_tools())
+                    logger.debug("[thread=%s] MCP lazy init: waiting for future.result() (NO TIMEOUT)...", thread_id)
                     future.result()
+                    logger.debug("[thread=%s] MCP lazy init: future.result() returned successfully", thread_id)
             else:
                 # If no loop is running, we can use the current loop
+                logger.debug("[thread=%s] MCP lazy init: no running event loop, using loop.run_until_complete()...", thread_id)
                 loop.run_until_complete(initialize_mcp_tools())
+                logger.debug("[thread=%s] MCP lazy init: run_until_complete() returned successfully", thread_id)
         except RuntimeError:
             # No event loop exists, create one
+            logger.debug("[thread=%s] MCP lazy init: RuntimeError, creating new event loop with asyncio.run()...", thread_id)
             try:
                 asyncio.run(initialize_mcp_tools())
+                logger.debug("[thread=%s] MCP lazy init: asyncio.run() returned successfully", thread_id)
             except Exception:
-                logger.exception("Failed to lazy-initialize MCP tools")
+                logger.exception("[thread=%s] Failed to lazy-initialize MCP tools", thread_id)
                 return []
         except Exception:
-            logger.exception("Failed to lazy-initialize MCP tools")
+            logger.exception("[thread=%s] Failed to lazy-initialize MCP tools", thread_id)
             return []
+    else:
+        logger.debug("[thread=%s] MCP tools already initialized, returning cached (%d tools)", thread_id, len(_mcp_tools_cache or []))
 
     return _mcp_tools_cache or []
 

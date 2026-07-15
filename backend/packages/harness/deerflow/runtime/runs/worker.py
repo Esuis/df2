@@ -251,10 +251,12 @@ async def run_agent(
         # the agent name that this run will actually execute.
         config.setdefault("run_name", resolve_root_run_name(config, record.assistant_id))
         runnable_config = RunnableConfig(**config)
+        logger.debug("[thread=%s] run_agent: calling agent_factory (make_lead_agent)...", thread_id)
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
             agent = agent_factory(config=runnable_config, app_config=ctx.app_config)
         else:
             agent = agent_factory(config=runnable_config)
+        logger.debug("[thread=%s] run_agent: agent_factory returned, agent created successfully", thread_id)
 
         # Capture the effective (resolved) model name from the agent's metadata.
         # _resolve_model_name in agent.py may return the default model if the
@@ -303,12 +305,13 @@ async def run_agent(
                 deduped.append(m)
         lg_modes = deduped
 
-        logger.info("Run %s: streaming with modes %s (requested: %s)", run_id, lg_modes, requested_modes)
+        logger.debug("[thread=%s] Run %s: streaming with modes %s (requested: %s)", thread_id, run_id, lg_modes, requested_modes)
 
         # 7. Stream using graph.astream
         if len(lg_modes) == 1 and not stream_subgraphs:
             # Single mode, no subgraphs: astream yields raw chunks
             single_mode = lg_modes[0]
+            logger.debug("[thread=%s] Run %s: calling agent.astream (single mode=%s)...", thread_id, run_id, single_mode)
             async for chunk in agent.astream(graph_input, config=runnable_config, stream_mode=single_mode):
                 if record.abort_event.is_set():
                     logger.info("Run %s abort requested — stopping", run_id)
@@ -316,8 +319,10 @@ async def run_agent(
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
                 sse_event = _lg_mode_to_sse_event(single_mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
+            logger.debug("[thread=%s] Run %s: agent.astream completed", thread_id, run_id)
         else:
             # Multiple modes or subgraphs: astream yields tuples
+            logger.debug("[thread=%s] Run %s: calling agent.astream (multi mode=%s)...", thread_id, run_id, lg_modes)
             async for item in agent.astream(
                 graph_input,
                 config=runnable_config,
@@ -335,6 +340,7 @@ async def run_agent(
                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk)
                 sse_event = _lg_mode_to_sse_event(mode)
                 await bridge.publish(run_id, sse_event, serialize(chunk, mode=mode))
+            logger.debug("[thread=%s] Run %s: agent.astream (multi mode) completed", thread_id, run_id)
 
         # 8. Final status
         if record.abort_event.is_set():

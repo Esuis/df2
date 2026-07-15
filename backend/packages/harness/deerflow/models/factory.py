@@ -80,7 +80,7 @@ def _apply_stream_chunk_timeout_default(model_use_path: str, model_settings_from
     model_settings_from_config["stream_chunk_timeout"] = _DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS
 
 
-def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, attach_tracing: bool = True, runtime_model_override: str | None = None, add_think: bool = False, **kwargs) -> BaseChatModel:
+def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, attach_tracing: bool = True, runtime_model_override: str | None = None, add_think: bool = False, thread_id: str | None = None, **kwargs) -> BaseChatModel:
     """Create a chat model instance from the config.
 
     Args:
@@ -102,9 +102,11 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     Returns:
         A chat model instance.
     """
+    logger.debug("[thread=%s] create_chat_model: name=%s, thinking_enabled=%s, attach_tracing=%s", thread_id, name, thinking_enabled, attach_tracing)
     config = app_config or get_app_config()
     if name is None:
         name = config.models[0].name
+    logger.debug("[thread=%s] create_chat_model: getting model config for '%s'...", thread_id, name)
     model_config = config.get_model_config(name)
     if model_config is None:
         raise ValueError(f"Model {name} not found in config") from None
@@ -113,7 +115,9 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if model_config.dynamic_model and runtime_model_override:
         model_config = model_config.model_copy(update={"model": runtime_model_override})
 
+    logger.debug("[thread=%s] create_chat_model: resolving model class '%s'...", thread_id, model_config.use)
     model_class = resolve_class(model_config.use, BaseChatModel)
+    logger.debug("[thread=%s] create_chat_model: model class resolved, instantiating...", thread_id)
     model_settings_from_config = model_config.model_dump(
         exclude_none=True,
         exclude={
@@ -153,7 +157,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
                 model_settings_from_config.get("extra_body"),
                 {"thinking": {"type": "disabled"}},
             )
-            model_settings_from_config["reasoning_effort"] = "minimal"
+            model_settings_from_config["reasoning_effort"] = "low"
         elif has_thinking_settings and (disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs(effective_wte.get("extra_body", {}).get("chat_template_kwargs") or {})):
             # vLLM uses chat template kwargs to switch thinking on/off.
             model_settings_from_config["extra_body"] = _deep_merge_dicts(
@@ -203,6 +207,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     
     
     model_instance = model_class(**kwargs, **model_settings_from_config)
+    logger.debug("[thread=%s] create_chat_model: model instance created successfully (class=%s)", thread_id, model_class.__name__)
 
     # 启用 <think> 标签注入（由前端 add_think 参数控制）
     if add_think:

@@ -49,6 +49,7 @@ def get_available_tools(
     runtime_supports_vision: bool | None = None,
     *,
     app_config: AppConfig | None = None,
+    thread_id: str | None = None,
 ) -> list[BaseTool]:
     """Get all available tools from config.
 
@@ -69,11 +70,16 @@ def get_available_tools(
     config = app_config or get_app_config()
     tool_configs = [tool for tool in config.tools if groups is None or tool.group in groups]
 
+    logger.debug("[thread=%s] get_available_tools: config tools matched=%s (groups=%s)", thread_id, len(tool_configs), groups)
+
     # Do not expose host bash by default when LocalSandboxProvider is active.
     if not is_host_bash_allowed(config):
         tool_configs = [tool for tool in tool_configs if not _is_host_bash_tool(tool)]
+        logger.debug("[thread=%s] get_available_tools: after host-bash filter, count=%s", thread_id, len(tool_configs))
 
+    logger.debug("[thread=%s] get_available_tools: resolving %s tool config(s)...", thread_id, len(tool_configs))
     loaded_tools_raw = [(cfg, resolve_variable(cfg.use, BaseTool)) for cfg in tool_configs]
+    logger.debug("[thread=%s] get_available_tools: tools resolved, count=%s", thread_id, len(loaded_tools_raw))
 
     # Warn when the config ``name`` field and the tool object's ``.name``
     # attribute diverge — this mismatch is the root cause of issue #1803 where
@@ -128,9 +134,10 @@ def get_available_tools(
 
             extensions_config = ExtensionsConfig.from_file()
             if extensions_config.get_enabled_mcp_servers():
-                mcp_tools = get_cached_mcp_tools()
+                logger.debug("[thread=%s] get_available_tools: loading MCP tools (lazy init)...", thread_id)
+                mcp_tools = get_cached_mcp_tools(thread_id=thread_id)
                 if mcp_tools:
-                    logger.info(f"Using {len(mcp_tools)} cached MCP tool(s)")
+                    logger.debug("[thread=%s] get_available_tools: %d cached MCP tool(s)", thread_id, len(mcp_tools))
 
                     # Tag MCP-sourced tools so deferred-tool assembly (done at
                     # the agent construction site, AFTER tool-policy filtering)

@@ -609,7 +609,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         thinking_enabled = False
 
     logger.info(
-        "Create Agent(%s) -> thinking_enabled: %s, reasoning_effort: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s",
+        "[thread=%s] Create Agent(%s) -> thinking_enabled: %s, reasoning_effort: %s, model_name: %s, is_plan_mode: %s, subagent_enabled: %s, max_concurrent_subagents: %s",
+        thread_id,
         agent_name or "default",
         thinking_enabled,
         reasoning_effort,
@@ -645,22 +646,36 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # actually propagates ``langfuse_session_id`` / ``langfuse_user_id`` from
     # ``config["metadata"]`` onto the trace. Without root-level attachment the
     # model is a nested observation and the handler strips ``langfuse_*`` keys.
+    logger.debug("[thread=%s] Step 1/7: building tracing callbacks...", thread_id)
     tracing_callbacks = build_tracing_callbacks()
     if tracing_callbacks:
         existing = config.get("callbacks") or []
         if not isinstance(existing, list):
             existing = list(existing)
         config["callbacks"] = [*existing, *tracing_callbacks]
+    logger.debug("[thread=%s] Step 1/7: tracing callbacks done, count=%s", thread_id, len(tracing_callbacks))
 
+    logger.debug("[thread=%s] Step 2/7: loading skills for tool policy...", thread_id)
     skills_for_tool_policy = _load_enabled_skills_for_tool_policy(available_skills, app_config=resolved_app_config)
+    logger.debug("[thread=%s] Step 2/7: skills loaded, count=%s", thread_id, len(skills_for_tool_policy))
 
     if is_bootstrap:
         # Special bootstrap agent with minimal prompt for initial custom agent creation flow
-        raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config, runtime_supports_vision=effective_supports_vision) + [setup_agent]
+        logger.debug("[thread=%s] Step 3/7: getting available tools (bootstrap)...", thread_id)
+        raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config, runtime_supports_vision=effective_supports_vision, thread_id=thread_id) + [setup_agent]
+        logger.debug("[thread=%s] Step 3/7: raw tools loaded, count=%s", thread_id, len(raw_tools))
+        logger.debug("[thread=%s] Step 4/7: filtering tools by skill policy...", thread_id)
         filtered = filter_tools_by_skill_allowed_tools(raw_tools, skills_for_tool_policy)
+        logger.debug("[thread=%s] Step 4/7: filtered tools count=%s", thread_id, len(filtered))
+        logger.debug("[thread=%s] Step 5/7: assembling deferred tools...", thread_id)
         final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
+        logger.debug("[thread=%s] Step 5/7: deferred setup done, final_tools=%s, deferred_names=%s", thread_id, len(final_tools), len(setup.deferred_names))
+        logger.debug("[thread=%s] Step 6/7: creating chat model...", thread_id)
+        model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, runtime_model_override=runtime_model_override, add_think=add_think, app_config=resolved_app_config, attach_tracing=False, thread_id=thread_id)
+        logger.debug("[thread=%s] Step 6/7: chat model created", thread_id)
+        logger.debug("[thread=%s] Step 7/7: building middlewares + prompt + create_agent (bootstrap)...", thread_id)
         return create_agent(
-            model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, runtime_model_override=runtime_model_override, add_think=add_think, app_config=resolved_app_config, attach_tracing=False),
+            model=model,
             tools=final_tools,
             middleware=build_middlewares(
                 config,
@@ -680,18 +695,28 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             ),
             state_schema=ThreadState,
         )
-        
+
     # Custom agents can update their own SOUL.md / config via update_agent.
     # The default agent (no agent_name) does not see this tool.
     extra_tools = [update_agent] if agent_name else []
     # Default lead agent (unchanged behavior)
-    raw_tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config, runtime_supports_vision=effective_supports_vision)
+    logger.debug("[thread=%s] Step 3/7: getting available tools...", thread_id)
+    raw_tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config, runtime_supports_vision=effective_supports_vision, thread_id=thread_id)
+    logger.debug("[thread=%s] Step 3/7: raw tools loaded, count=%s", thread_id, len(raw_tools))
+    logger.debug("[thread=%s] Step 4/7: filtering tools by skill policy...", thread_id)
     filtered = filter_tools_by_skill_allowed_tools(raw_tools + extra_tools, skills_for_tool_policy)
+    logger.debug("[thread=%s] Step 4/7: filtered tools count=%s", thread_id, len(filtered))
+    logger.debug("[thread=%s] Step 5/7: assembling deferred tools...", thread_id)
     final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
+    logger.debug("[thread=%s] Step 5/7: deferred setup done, final_tools=%s, deferred_names=%s", thread_id, len(final_tools), len(setup.deferred_names))
 
     # Default lead agent (unchanged behavior)
+    logger.debug("[thread=%s] Step 6/7: creating chat model...", thread_id)
+    model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, runtime_model_override=runtime_model_override, add_think=add_think, thread_id=thread_id)
+    logger.debug("[thread=%s] Step 6/7: chat model created", thread_id)
+    logger.debug("[thread=%s] Step 7/7: building middlewares + prompt + create_agent...", thread_id)
     return create_agent(
-        model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, runtime_model_override=runtime_model_override, add_think=add_think),
+        model=model,
         tools=final_tools,
         middleware=build_middlewares(
             config,

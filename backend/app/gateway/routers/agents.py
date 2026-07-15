@@ -426,7 +426,7 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
                 new_memory = agent_cfg.memory
             if new_memory is not None:
                 new_memory = dict(new_memory)
-                user_desc = new_memory.get("update_prompt") or DEFAULT_MEMORY_DESCRIPTION
+                user_desc = (new_memory.get("update_prompt") or "").strip() or DEFAULT_MEMORY_DESCRIPTION
                 new_memory["update_prompt"] = FULL_MEMORY_TEMPLATE.replace("{memory_description}", user_desc)
                 updated["memory"] = new_memory
 
