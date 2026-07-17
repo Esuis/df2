@@ -64,6 +64,7 @@ class AgentResponse(BaseModel):
     skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all, []=none)")
     summarization: dict | None = Field(default=None, description="Optional per-agent summarization override (None=use global, dict=partial override merged at runtime)")
     memory: dict | None = Field(default=None, description="Optional per-agent memory override (None=use global, dict=partial override merged at runtime)")
+    scene_code: str | None = Field(default=None, description="ELLM scene_code override (None=use global config)")
     soul: str | None = Field(default=None, description="SOUL.md content")
 
 
@@ -93,6 +94,7 @@ class AgentUpdateRequest(BaseModel):
     skills: list[str] | None = Field(default=None, description="Updated skill whitelist (None=all, []=none)")
     summarization: dict | None = Field(default=None, description="Updated per-agent summarization override (None=use global, dict=partial override merged at runtime)")
     memory: dict | None = Field(default=None, description="Updated per-agent memory override (None=use global, dict=partial override merged at runtime)")
+    scene_code: str | None = Field(default=None, description="ELLM scene_code override")
     soul: str | None = Field(default=None, description="Updated SOUL.md content")
 
 
@@ -176,6 +178,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
         skills=agent_cfg.skills,
         summarization=agent_cfg.summarization,
         memory=_sanitize_memory_for_response(agent_cfg.memory),
+        scene_code=agent_cfg.scene_code,
         soul=soul,
     )
 
@@ -388,7 +391,8 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
         # Use model_fields_set to distinguish "field omitted" from "explicitly set to null".
         # This is critical for skills where None means "inherit all" (not "don't change").
         fields_set = request.model_fields_set
-        config_changed = bool(fields_set & {"description", "model", "tool_groups", "skills", "summarization", "memory"})
+        config_changed = bool(fields_set & {"description", "model", "tool_groups",
+                                             "skills", "summarization", "memory", "scene_code"})
 
         if config_changed:
             updated: dict = {
@@ -429,6 +433,12 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
                 user_desc = (new_memory.get("update_prompt") or "").strip() or DEFAULT_MEMORY_DESCRIPTION
                 new_memory["update_prompt"] = FULL_MEMORY_TEMPLATE.replace("{memory_description}", user_desc)
                 updated["memory"] = new_memory
+
+            # scene_code: explicit non-empty updates; not sent or empty → keep existing
+            if "scene_code" in fields_set and request.scene_code:
+                updated["scene_code"] = request.scene_code
+            elif agent_cfg.scene_code:
+                updated["scene_code"] = agent_cfg.scene_code
 
             config_file = agent_dir / "config.yaml"
             with open(config_file, "w", encoding="utf-8") as f:

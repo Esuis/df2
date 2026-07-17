@@ -57,6 +57,9 @@ class AgentConfig(BaseModel):
     # so only the fields you want to override need to be present.
     # Example: {"enabled": false} to disable memory for this agent.
     memory: dict[str, Any] | None = None
+    # scene_code: None (default) = use global model config's scene_code;
+    # non-None = override the ELLM model's scene_code at model creation time.
+    scene_code: str | None = None
 
 
 def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:

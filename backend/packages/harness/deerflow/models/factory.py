@@ -80,7 +80,7 @@ def _apply_stream_chunk_timeout_default(model_use_path: str, model_settings_from
     model_settings_from_config["stream_chunk_timeout"] = _DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS
 
 
-def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, attach_tracing: bool = True, runtime_model_override: str | None = None, add_think: bool = False, thread_id: str | None = None, **kwargs) -> BaseChatModel:
+def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, attach_tracing: bool = True, runtime_model_override: str | None = None, add_think: bool = False, thread_id: str | None = None, scene_code_override: str | None = None, **kwargs) -> BaseChatModel:
     """Create a chat model instance from the config.
 
     Args:
@@ -204,8 +204,11 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if "stream_usage" not in model_settings_from_config and "stream_usage" not in kwargs:
         if "stream_usage" in getattr(model_class, "model_fields", {}):
             model_settings_from_config["stream_usage"] = True
-    
-    
+
+    # Agent-level scene_code overrides global model config (ELLM models only)
+    if scene_code_override and "scene_code" in model_settings_from_config:
+        model_settings_from_config["scene_code"] = scene_code_override
+
     model_instance = model_class(**kwargs, **model_settings_from_config)
     logger.debug("[thread=%s] create_chat_model: model instance created successfully (class=%s)", thread_id, model_class.__name__)
 

@@ -585,6 +585,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     available_skills = _available_skill_names(agent_config, is_bootstrap)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
+    agent_scene_code = agent_config.scene_code if agent_config else None
 
     # Final model name resolution: request → agent config → global default, with fallback for unknown names
     model_name = _resolve_model_name(requested_model_name or agent_model_name, app_config=resolved_app_config)
@@ -671,7 +672,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         final_tools, setup = assemble_deferred_tools(filtered, enabled=resolved_app_config.tool_search.enabled)
         logger.debug("[thread=%s] Step 5/7: deferred setup done, final_tools=%s, deferred_names=%s", thread_id, len(final_tools), len(setup.deferred_names))
         logger.debug("[thread=%s] Step 6/7: creating chat model...", thread_id)
-        model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, runtime_model_override=runtime_model_override, add_think=add_think, app_config=resolved_app_config, attach_tracing=False, thread_id=thread_id)
+        model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, runtime_model_override=runtime_model_override, add_think=add_think, app_config=resolved_app_config, attach_tracing=False, thread_id=thread_id, scene_code_override=agent_scene_code)
         logger.debug("[thread=%s] Step 6/7: chat model created", thread_id)
         logger.debug("[thread=%s] Step 7/7: building middlewares + prompt + create_agent (bootstrap)...", thread_id)
         return create_agent(
@@ -712,7 +713,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     # Default lead agent (unchanged behavior)
     logger.debug("[thread=%s] Step 6/7: creating chat model...", thread_id)
-    model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, runtime_model_override=runtime_model_override, add_think=add_think, thread_id=thread_id)
+    model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, runtime_model_override=runtime_model_override, add_think=add_think, thread_id=thread_id, scene_code_override=agent_scene_code)
     logger.debug("[thread=%s] Step 6/7: chat model created", thread_id)
     logger.debug("[thread=%s] Step 7/7: building middlewares + prompt + create_agent...", thread_id)
     return create_agent(
